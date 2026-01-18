@@ -6,13 +6,16 @@ from pynput.mouse import Controller as MouseController
 
 class AimExercise:
     def __init__(self, root, stats_tracker, screen_width, screen_height, 
-                 h_dpi=1000, h_cm_per_360=29.39,
-                 v_dpi=1250, v_cm_per_360=18.81):
+                 h_dpi=1000, h_cm_per_360=31.058,
+                 v_dpi=1000, v_cm_per_360=31.058):
         self.root = root
         self.stats = stats_tracker
         self.screen_width = screen_width
         self.screen_height = screen_height
-        self.target_size = 25  # Smaller targets
+        self.target_size = 25  # Base target size
+        self.target_min_size = 15  # Minimum size when pulsing
+        self.target_max_size = 35  # Maximum size when pulsing
+        self.target_lifetime = 3.0  # Seconds before target disappears
         self.is_active = False
         self.target_spawn_time = 0
         self.mouse_locked = False
@@ -40,7 +43,7 @@ class AimExercise:
         self.num_targets = 5  # Number of simultaneous targets
         
         # Game mode
-        self.game_mode = None  # Will be 'random' or 'shapes'
+        self.game_mode = None  # Will be 'random', 'shapes', or 'tracking'
         
         # Shape tracking mode variables
         self.current_shape = []  # List of target positions for current shape
@@ -49,6 +52,14 @@ class AimExercise:
         self.total_shapes = 10
         self.shape_types = ['square', 'triangle', 'circle', 'diamond', 'pentagon']
         
+        # Tracking mode variables
+        self.tracking_targets = []  # List of tracking target objects
+        self.tracking_score = 0
+        self.tracking_time_on_target = 0.0
+        self.tracking_total_time = 0.0
+        self.tracking_start_time = 0
+        self.tracking_duration = 60  # 60 second rounds
+        
         # Track if mouse was locked before losing focus
         self.mouse_was_locked = False
         
@@ -56,6 +67,13 @@ class AimExercise:
         self.trail_points = []  # List of (yaw, pitch, timestamp)
         self.trail_fade_time = 0.5  # Seconds before trail fades completely
         self.last_trail_time = 0  # Track when we last added a trail point
+        
+        # Path efficiency tracking
+        self.last_hit_yaw = 0.0  # Position where last target was hit
+        self.last_hit_pitch = 0.0
+        self.path_points = []  # List of (yaw, pitch) points during movement
+        self.path_efficiencies = []  # List of efficiency percentages for averaging
+        self.has_last_hit = False  # Whether we have a previous hit to measure from
         
         # Mouse controller
         self.mouse = MouseController()
@@ -93,11 +111,11 @@ class AimExercise:
             font=("Arial", 14, "bold"),
             bg="#0066cc",
             fg="white",
-            width=30,
+            width=25,
             height=5,
             relief=tk.FLAT
         )
-        self.random_mode_btn.pack(side=tk.LEFT, padx=20)
+        self.random_mode_btn.pack(side=tk.LEFT, padx=15)
         
         # Shape tracking mode button
         self.shapes_mode_btn = tk.Button(
@@ -107,11 +125,25 @@ class AimExercise:
             font=("Arial", 14, "bold"),
             bg="#cc6600",
             fg="white",
-            width=30,
+            width=25,
             height=5,
             relief=tk.FLAT
         )
-        self.shapes_mode_btn.pack(side=tk.LEFT, padx=20)
+        self.shapes_mode_btn.pack(side=tk.LEFT, padx=15)
+        
+        # Tracking practice mode button
+        self.tracking_mode_btn = tk.Button(
+            self.mode_frame,
+            text="TRACKING PRACTICE\n\nKeep crosshair on moving targets\n60 second rounds",
+            command=lambda: self.select_mode('tracking'),
+            font=("Arial", 14, "bold"),
+            bg="#00aa66",
+            fg="white",
+            width=25,
+            height=5,
+            relief=tk.FLAT
+        )
+        self.tracking_mode_btn.pack(side=tk.LEFT, padx=15)
         
         # Control buttons (initially hidden)
         self.button_frame = tk.Frame(self.root, bg="#1a1a1a")
@@ -224,9 +256,12 @@ class AimExercise:
         if mode == 'random':
             self.title.config(text="Random Targets Mode", font=("Arial", 20, "bold"))
             self.stats_label.config(text="Press START to begin | ESC to exit")
-        else:
+        elif mode == 'shapes':
             self.title.config(text="Shape Tracking Mode", font=("Arial", 20, "bold"))
             self.stats_label.config(text="Complete 10 shapes | Press START to begin | ESC to exit")
+        elif mode == 'tracking':
+            self.title.config(text="Tracking Practice Mode", font=("Arial", 20, "bold"))
+            self.stats_label.config(text="Keep crosshair on targets to degrade them | 60 seconds | ESC to exit")
         
         # Show control buttons
         self.button_frame.pack(pady=10)
@@ -298,6 +333,9 @@ class AimExercise:
         # Clear targets and trail
         self.targets = []
         self.trail_points = []
+        self.path_efficiencies = []  # Reset path tracking
+        self.path_points = []
+        self.has_last_hit = False
         
         # Reset shape mode variables
         self.shapes_completed = 0
@@ -312,8 +350,15 @@ class AimExercise:
         if self.game_mode == 'random':
             for _ in range(self.num_targets):
                 self.spawn_target()
-        else:  # shapes mode
+        elif self.game_mode == 'shapes':
             self.spawn_shape()
+        elif self.game_mode == 'tracking':
+            self.tracking_start_time = time.time()
+            self.tracking_time_on_target = 0.0
+            self.tracking_total_time = 0.0
+            self.tracking_targets = []
+            self.spawn_tracking_target()
+            self.spawn_tracking_target()  # Start with 2 targets
         
         self.lock_mouse_loop()
         
@@ -371,6 +416,10 @@ class AimExercise:
                 if current_time - self.last_trail_time > 0.01:  # Every 10ms
                     self.trail_points.append((self.yaw, self.pitch, current_time))
                     self.last_trail_time = current_time
+                    
+                    # Track path for efficiency calculation (always recording in random mode)
+                    if self.game_mode == 'random' and self.has_last_hit:
+                        self.path_points.append((self.yaw, self.pitch))
                 
                 # Recenter mouse to lock position only if window has focus
                 if self.root.focus_displayof() is not None:
@@ -380,6 +429,18 @@ class AimExercise:
             
             # Always redraw the scene (even when unlocked)
             self.draw_scene()
+            
+            # Update tracking targets if in tracking mode
+            if self.game_mode == 'tracking' and self.mouse_locked:
+                current_time = time.time()
+                delta_time = 0.016  # Approximately 60fps
+                self.update_tracking_targets(delta_time)
+                
+                # Check if time is up
+                elapsed = current_time - self.tracking_start_time
+                if elapsed >= self.tracking_duration:
+                    self.stop_exercise()
+                    return
             
             # Schedule next check
             self.root.after(1, self.lock_mouse_loop)
@@ -469,6 +530,179 @@ class AimExercise:
         self.current_shape_index = 0
         self.targets = [self.current_shape[0]]  # Start with first target
             
+    def calculate_path_efficiency(self, target_yaw, target_pitch):
+        """Calculate how efficiently the cursor moved from last hit to this target"""
+        if len(self.path_points) < 2 or not self.has_last_hit:
+            return None  # Not enough data
+        
+        # Calculate direct distance from last hit to this target
+        yaw_diff = target_yaw - self.last_hit_yaw
+        # Handle yaw wraparound
+        while yaw_diff > 180:
+            yaw_diff -= 360
+        while yaw_diff < -180:
+            yaw_diff += 360
+            
+        direct_distance = math.sqrt(
+            yaw_diff ** 2 +
+            (target_pitch - self.last_hit_pitch) ** 2
+        )
+        
+        if direct_distance < 0.1:  # Target was very close, skip
+            return None
+        
+        # Calculate actual path length traveled
+        actual_distance = 0.0
+        for i in range(1, len(self.path_points)):
+            yaw1, pitch1 = self.path_points[i - 1]
+            yaw2, pitch2 = self.path_points[i]
+            
+            # Handle yaw wraparound
+            seg_yaw_diff = yaw2 - yaw1
+            while seg_yaw_diff > 180:
+                seg_yaw_diff -= 360
+            while seg_yaw_diff < -180:
+                seg_yaw_diff += 360
+            
+            segment_distance = math.sqrt(seg_yaw_diff ** 2 + (pitch2 - pitch1) ** 2)
+            actual_distance += segment_distance
+        
+        # Efficiency = direct / actual * 100 (100% = perfect straight line)
+        if actual_distance > 0:
+            efficiency = (direct_distance / actual_distance) * 100
+            return min(efficiency, 100.0)  # Cap at 100%
+        return None
+    
+    def record_hit_position(self):
+        """Record the current position as a hit location"""
+        self.last_hit_yaw = self.yaw
+        self.last_hit_pitch = self.pitch
+        self.has_last_hit = True
+        self.path_points = [(self.yaw, self.pitch)]  # Start fresh path from this hit
+    
+    def get_average_path_efficiency(self):
+        """Get average path efficiency across all tracked movements"""
+        if not self.path_efficiencies:
+            return 0.0
+        return sum(self.path_efficiencies) / len(self.path_efficiencies)
+    
+    def spawn_tracking_target(self):
+        """Spawn a moving target for tracking mode"""
+        if not self.is_active:
+            return
+        
+        # Random starting position within visible area
+        safe_width = self.canvas_width * 0.7
+        safe_height = self.canvas_height * 0.7
+        
+        screen_x = (self.canvas_width // 2) + random.uniform(-safe_width/2, safe_width/2)
+        screen_y = (self.canvas_height // 2) + random.uniform(-safe_height/2, safe_height/2)
+        
+        # Convert to angular position
+        center_x = self.canvas_width // 2
+        center_y = self.canvas_height // 2
+        
+        yaw_offset = (screen_x - center_x) / self.pixels_per_degree
+        pitch_offset = -(screen_y - center_y) / self.pixels_per_degree
+        
+        target_yaw = self.yaw + yaw_offset
+        target_pitch = self.pitch + pitch_offset
+        
+        # Random velocity (degrees per second)
+        speed = random.uniform(15, 35)  # Degrees per second
+        angle = random.uniform(0, 2 * math.pi)
+        vel_yaw = math.cos(angle) * speed
+        vel_pitch = math.sin(angle) * speed
+        
+        # Target properties: yaw, pitch, vel_yaw, vel_pitch, health (0-100), size
+        target = {
+            'yaw': target_yaw,
+            'pitch': target_pitch,
+            'vel_yaw': vel_yaw,
+            'vel_pitch': vel_pitch,
+            'health': 100.0,
+            'size': 40,
+            'last_update': time.time()
+        }
+        
+        self.tracking_targets.append(target)
+    
+    def update_tracking_targets(self, delta_time):
+        """Update tracking target positions and check for crosshair overlap"""
+        targets_to_remove = []
+        
+        for target in self.tracking_targets:
+            # Update position based on velocity
+            target['yaw'] += target['vel_yaw'] * delta_time
+            target['pitch'] += target['vel_pitch'] * delta_time
+            
+            # Bounce off screen edges (in angular space)
+            max_yaw_offset = (self.canvas_width * 0.4) / self.pixels_per_degree
+            max_pitch_offset = (self.canvas_height * 0.4) / self.pixels_per_degree
+            
+            # Calculate offset from current view
+            yaw_diff = target['yaw'] - self.yaw
+            while yaw_diff > 180:
+                yaw_diff -= 360
+            while yaw_diff < -180:
+                yaw_diff += 360
+            
+            pitch_diff = target['pitch'] - self.pitch
+            
+            # Bounce horizontally
+            if abs(yaw_diff) > max_yaw_offset:
+                target['vel_yaw'] *= -1
+                # Nudge back into bounds
+                if yaw_diff > 0:
+                    target['yaw'] = self.yaw + max_yaw_offset
+                else:
+                    target['yaw'] = self.yaw - max_yaw_offset
+            
+            # Bounce vertically
+            if abs(pitch_diff) > max_pitch_offset:
+                target['vel_pitch'] *= -1
+                if pitch_diff > 0:
+                    target['pitch'] = self.pitch + max_pitch_offset
+                else:
+                    target['pitch'] = self.pitch - max_pitch_offset
+            
+            # Clamp pitch
+            target['pitch'] = max(-89, min(89, target['pitch']))
+            
+            # Check if crosshair is on target
+            yaw_diff = target['yaw'] - self.yaw
+            while yaw_diff > 180:
+                yaw_diff -= 360
+            while yaw_diff < -180:
+                yaw_diff += 360
+            pitch_diff = target['pitch'] - self.pitch
+            
+            angular_distance = math.sqrt(yaw_diff**2 + pitch_diff**2)
+            target_angular_size = target['size'] / self.pixels_per_degree
+            
+            if angular_distance <= target_angular_size:
+                # Crosshair is on target - degrade health
+                damage_rate = 50.0  # Health per second while on target
+                target['health'] -= damage_rate * delta_time
+                self.tracking_time_on_target += delta_time
+                
+                if target['health'] <= 0:
+                    targets_to_remove.append(target)
+            
+            # Randomly change direction occasionally
+            if random.random() < 0.02:  # 2% chance per frame
+                angle = random.uniform(0, 2 * math.pi)
+                speed = math.sqrt(target['vel_yaw']**2 + target['vel_pitch']**2)
+                target['vel_yaw'] = math.cos(angle) * speed
+                target['vel_pitch'] = math.sin(angle) * speed
+        
+        # Remove destroyed targets and spawn new ones
+        for target in targets_to_remove:
+            self.tracking_targets.remove(target)
+            self.spawn_tracking_target()
+        
+        self.tracking_total_time += delta_time
+            
     def spawn_target(self):
         """Spawn a new target at random position within visible screen bounds"""
         if not self.is_active:
@@ -512,6 +746,36 @@ class AimExercise:
         center_x = self.canvas_width // 2
         center_y = self.canvas_height // 2
         
+        # Draw background grid pattern for spatial reference
+        grid_color = "#353535"  # Very faint grid
+        grid_spacing_degrees = 10  # Grid lines every 10 degrees
+        
+        # Calculate grid offset based on camera position
+        yaw_offset = (self.yaw % grid_spacing_degrees) * self.pixels_per_degree
+        pitch_offset = (self.pitch % grid_spacing_degrees) * self.pixels_per_degree
+        
+        # Draw vertical grid lines
+        for x in range(-self.canvas_width, self.canvas_width * 2, int(grid_spacing_degrees * self.pixels_per_degree)):
+            line_x = x - yaw_offset
+            if 0 <= line_x <= self.canvas_width:
+                self.canvas.create_line(
+                    line_x, 0, line_x, self.canvas_height,
+                    fill=grid_color,
+                    width=1,
+                    tags="grid"
+                )
+        
+        # Draw horizontal grid lines
+        for y in range(-self.canvas_height, self.canvas_height * 2, int(grid_spacing_degrees * self.pixels_per_degree)):
+            line_y = y + pitch_offset
+            if 0 <= line_y <= self.canvas_height:
+                self.canvas.create_line(
+                    0, line_y, self.canvas_width, line_y,
+                    fill=grid_color,
+                    width=1,
+                    tags="grid"
+                )
+        
         # Draw stats overlay at top
         if self.is_active:
             accuracy = self.stats.get_accuracy()
@@ -519,8 +783,19 @@ class AimExercise:
             
             if self.game_mode == 'random':
                 stats_text = f"Hits: {self.stats.hits} | Misses: {self.stats.misses} | Accuracy: {accuracy:.1f}%"
-            else:  # shapes mode
+                avg_efficiency = self.get_average_path_efficiency()
+                if avg_efficiency > 0:
+                    stats_text += f" | Path Efficiency: {avg_efficiency:.1f}%"
+            elif self.game_mode == 'shapes':
                 stats_text = f"Shape: {self.shapes_completed + 1}/{self.total_shapes} | Target: {self.current_shape_index + 1}/{len(self.current_shape)} | Hits: {self.stats.hits} | Misses: {self.stats.misses}"
+            elif self.game_mode == 'tracking':
+                elapsed = time.time() - self.tracking_start_time
+                remaining = max(0, self.tracking_duration - elapsed)
+                tracking_accuracy = 0
+                if self.tracking_total_time > 0:
+                    tracking_accuracy = (self.tracking_time_on_target / self.tracking_total_time) * 100
+                targets_destroyed = len([t for t in self.tracking_targets if t['health'] <= 0])
+                stats_text = f"Time: {remaining:.1f}s | Tracking Accuracy: {tracking_accuracy:.1f}% | On Target: {self.tracking_time_on_target:.1f}s"
             
             if avg_time > 0:
                 stats_text += f" | Avg Time: {avg_time:.3f}s"
@@ -608,7 +883,24 @@ class AimExercise:
             target_screen_x = center_x + (yaw_diff * self.pixels_per_degree)
             target_screen_y = center_y - (pitch_diff * self.pixels_per_degree)
             
-            margin = self.target_size + 10
+            # Calculate target age
+            target_age = current_time - spawn_time
+            
+            # For random mode: check if target expired
+            if self.game_mode == 'random' and target_age >= self.target_lifetime:
+                # Target expired, don't add to on_screen list (will be removed)
+                self.stats.record_miss()  # Count as miss
+                continue
+            
+            # Calculate shrinking size for random mode
+            if self.game_mode == 'random':
+                # Start at max size and shrink to min over lifetime
+                shrink_progress = target_age / self.target_lifetime  # 0 to 1 over lifetime
+                current_target_size = self.target_max_size - (self.target_max_size - self.target_min_size) * shrink_progress
+            else:
+                current_target_size = self.target_size
+            
+            margin = current_target_size + 10
             if (-margin <= target_screen_x <= self.canvas_width + margin and 
                 -margin <= target_screen_y <= self.canvas_height + margin):
                 
@@ -619,6 +911,16 @@ class AimExercise:
                     target_color = "#ff4444"  # Bright red for active
                     outline_color = "#ffaa00"  # Orange outline instead of yellow
                     outline_width = 4
+                elif self.game_mode == 'random':
+                    # Fade from purple to blue over lifetime
+                    shrink_progress = target_age / self.target_lifetime  # 0 to 1
+                    # Purple (148, 0, 211) to Blue (0, 100, 255)
+                    red = int(148 * (1 - shrink_progress))
+                    green = int(100 * shrink_progress)
+                    blue = int(211 + (255 - 211) * shrink_progress)
+                    target_color = f'#{red:02x}{green:02x}{blue:02x}'
+                    outline_color = "#ffffff"
+                    outline_width = 3
                 else:
                     target_color = "#ff0000"
                     outline_color = "#ffffff"
@@ -626,10 +928,10 @@ class AimExercise:
                 
                 # Draw target
                 self.canvas.create_oval(
-                    target_screen_x - self.target_size,
-                    target_screen_y - self.target_size,
-                    target_screen_x + self.target_size,
-                    target_screen_y + self.target_size,
+                    target_screen_x - current_target_size,
+                    target_screen_y - current_target_size,
+                    target_screen_x + current_target_size,
+                    target_screen_y + current_target_size,
                     fill=target_color,
                     outline=outline_color,
                     width=outline_width,
@@ -684,6 +986,79 @@ class AimExercise:
             self.targets = targets_on_screen
             while len(self.targets) < self.num_targets:
                 self.spawn_target()
+        
+        # Draw tracking targets
+        if self.game_mode == 'tracking':
+            for target in self.tracking_targets:
+                yaw_diff = target['yaw'] - self.yaw
+                pitch_diff = target['pitch'] - self.pitch
+                
+                while yaw_diff > 180:
+                    yaw_diff -= 360
+                while yaw_diff < -180:
+                    yaw_diff += 360
+                
+                target_screen_x = center_x + (yaw_diff * self.pixels_per_degree)
+                target_screen_y = center_y - (pitch_diff * self.pixels_per_degree)
+                
+                # Only draw if on screen
+                if (0 <= target_screen_x <= self.canvas_width and 
+                    0 <= target_screen_y <= self.canvas_height):
+                    
+                    # Calculate color based on health (green at 100, yellow at 50, red at 0)
+                    health = target['health']
+                    if health > 50:
+                        # Green to yellow (100->50)
+                        ratio = (health - 50) / 50
+                        red = int(255 * (1 - ratio))
+                        green = 255
+                    else:
+                        # Yellow to red (50->0)
+                        ratio = health / 50
+                        red = 255
+                        green = int(255 * ratio)
+                    target_color = f'#{red:02x}{green:02x}00'
+                    
+                    # Size based on health (shrinks as health decreases)
+                    current_size = target['size'] * (0.5 + 0.5 * (health / 100))
+                    
+                    # Draw target
+                    self.canvas.create_oval(
+                        target_screen_x - current_size,
+                        target_screen_y - current_size,
+                        target_screen_x + current_size,
+                        target_screen_y + current_size,
+                        fill=target_color,
+                        outline="#ffffff",
+                        width=2,
+                        tags="tracking_target"
+                    )
+                    
+                    # Draw health bar above target
+                    bar_width = 50
+                    bar_height = 6
+                    bar_x = target_screen_x - bar_width / 2
+                    bar_y = target_screen_y - current_size - 15
+                    
+                    # Background
+                    self.canvas.create_rectangle(
+                        bar_x, bar_y,
+                        bar_x + bar_width, bar_y + bar_height,
+                        fill="#333333",
+                        outline="#ffffff",
+                        tags="tracking_target"
+                    )
+                    
+                    # Health fill
+                    fill_width = (health / 100) * bar_width
+                    if fill_width > 0:
+                        self.canvas.create_rectangle(
+                            bar_x, bar_y,
+                            bar_x + fill_width, bar_y + bar_height,
+                            fill=target_color,
+                            outline="",
+                            tags="tracking_target"
+                        )
             
     def on_shoot(self, event):
         """Handle shooting (clicking)"""
@@ -720,7 +1095,12 @@ class AimExercise:
                 yaw_diff += 360
             
             angular_distance = math.sqrt(yaw_diff**2 + pitch_diff**2)
-            target_angular_size = self.target_size / self.pixels_per_degree
+            
+            # Calculate current shrinking size
+            target_age = time.time() - spawn_time
+            shrink_progress = target_age / self.target_lifetime  # 0 to 1 over lifetime
+            current_target_size = self.target_max_size - (self.target_max_size - self.target_min_size) * shrink_progress
+            target_angular_size = current_target_size / self.pixels_per_degree
             
             if angular_distance <= target_angular_size:
                 if angular_distance < min_distance:
@@ -729,8 +1109,19 @@ class AimExercise:
         
         if hit_target is not None:
             target_index, spawn_time = hit_target
+            target_yaw, target_pitch, _ = self.targets[target_index]
             reaction_time = time.time() - spawn_time
             self.stats.record_hit(reaction_time)
+            
+            # Calculate path efficiency from last hit to this hit
+            if self.has_last_hit:
+                efficiency = self.calculate_path_efficiency(target_yaw, target_pitch)
+                if efficiency is not None:
+                    self.path_efficiencies.append(efficiency)
+            
+            # Record this hit position for next path measurement
+            self.record_hit_position()
+            
             del self.targets[target_index]
             self.spawn_target()
             self.update_stats_display()

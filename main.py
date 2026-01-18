@@ -24,9 +24,9 @@ class AimWarmupApp:
             self.screen_width, 
             self.screen_height,
             h_dpi=1000,
-            h_cm_per_360=29.39,
-            v_dpi=1250,
-            v_cm_per_360=18.81
+            h_cm_per_360=31.058,
+            v_dpi=1000,
+            v_cm_per_360=31.058
         )
         
         # Setup hotkey (Ctrl+Shift+A to toggle)
