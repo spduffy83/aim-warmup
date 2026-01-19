@@ -20,19 +20,23 @@ class AimExercise:
         self.target_spawn_time = 0
         self.mouse_locked = False
         
-        # Horizontal sensitivity calculations
-        h_inches_per_360 = h_cm_per_360 / 2.54
-        h_counts_per_360 = h_inches_per_360 * h_dpi
-        self.h_counts_per_degree = h_counts_per_360 / 360.0
+        # Store DPI values for recalculation
+        self.h_dpi = h_dpi
+        self.v_dpi = v_dpi
         
-        # Vertical sensitivity calculations
-        v_inches_per_360 = v_cm_per_360 / 2.54
-        v_counts_per_360 = v_inches_per_360 * v_dpi
-        self.v_counts_per_degree = v_counts_per_360 / 360.0
+        # Sensitivity presets (cm per 360) with Fortnite sens labels
+        self.sensitivity_presets = {
+            1: {'cm360': 31.058, 'fn_sens': '5.3%'},
+            2: {'cm360': 29.22, 'fn_sens': '5.6%'},
+            3: {'cm360': 27.73, 'fn_sens': '5.9%'},
+            4: {'cm360': 26.39, 'fn_sens': '6.2%'},
+            5: {'cm360': 25.72, 'fn_sens': '6.4%'},
+            6: {'cm360': 24.57, 'fn_sens': '6.7%'}
+        }
+        self.current_preset = 5  # Default to preset 5 (Fortnite 6.4%)
         
-        # Sensitivity matching toggle
-        self.match_sensitivities = False  # Default to independent
-        self.original_v_counts_per_degree = self.v_counts_per_degree
+        # Apply initial sensitivity
+        self.apply_sensitivity(self.sensitivity_presets[self.current_preset]['cm360'])
         
         # Virtual camera yaw/pitch (in degrees)
         self.yaw = 0.0
@@ -86,6 +90,18 @@ class AimExercise:
         
         # Create UI
         self.setup_ui()
+    
+    def apply_sensitivity(self, cm_per_360):
+        """Apply sensitivity setting (same for both horizontal and vertical)"""
+        # Horizontal sensitivity calculations
+        h_inches_per_360 = cm_per_360 / 2.54
+        h_counts_per_360 = h_inches_per_360 * self.h_dpi
+        self.h_counts_per_degree = h_counts_per_360 / 360.0
+        
+        # Vertical sensitivity calculations (same cm/360)
+        v_inches_per_360 = cm_per_360 / 2.54
+        v_counts_per_360 = v_inches_per_360 * self.v_dpi
+        self.v_counts_per_degree = v_counts_per_360 / 360.0
         
     def setup_ui(self):
         """Setup the exercise UI"""
@@ -201,19 +217,33 @@ class AimExercise:
         )
         self.back_btn.pack(side=tk.LEFT, padx=10)
         
-        # Sensitivity toggle button
-        self.sens_toggle_btn = tk.Button(
-            self.button_frame,
-            text="MATCH Y SENS",
-            command=self.toggle_sensitivity_match,
-            font=("Arial", 12),
-            bg="#0066aa",
-            fg="white",
-            width=12,
-            height=1,
-            relief=tk.FLAT
+        # Sensitivity preset buttons frame
+        self.sens_frame = tk.Frame(self.root, bg="#1a1a1a")
+        self.sens_label = tk.Label(
+            self.sens_frame,
+            text="Fortnite Sens:",
+            font=("Arial", 11),
+            bg="#1a1a1a",
+            fg="#aaaaaa"
         )
-        self.sens_toggle_btn.pack(side=tk.LEFT, padx=10)
+        self.sens_label.pack(side=tk.LEFT, padx=(0, 10))
+        
+        # Create 6 sensitivity preset buttons
+        self.sens_buttons = {}
+        for preset_num, preset_data in self.sensitivity_presets.items():
+            btn = tk.Button(
+                self.sens_frame,
+                text=f"{preset_data['fn_sens']}",
+                command=lambda p=preset_num: self.set_sensitivity_preset(p),
+                font=("Arial", 11, "bold"),
+                bg="#00aa00" if preset_num == self.current_preset else "#444444",
+                fg="white",
+                width=6,
+                height=1,
+                relief=tk.FLAT
+            )
+            btn.pack(side=tk.LEFT, padx=3)
+            self.sens_buttons[preset_num] = btn
         
         # Stats display
         self.stats_label = tk.Label(
@@ -242,8 +272,25 @@ class AimExercise:
         self.root.bind("<FocusOut>", self.on_focus_lost)
         self.root.bind("<FocusIn>", self.on_focus_gained)
         
+        # Bind M key to return to mode selection
+        self.root.bind("<m>", lambda e: self.back_to_mode_select())
+        self.root.bind("<M>", lambda e: self.back_to_mode_select())
+        
         # Store initial canvas height
         self.canvas_height_inactive = self.screen_height - 200
+    
+    def set_sensitivity_preset(self, preset_num):
+        """Set the sensitivity to a preset value"""
+        self.current_preset = preset_num
+        cm_value = self.sensitivity_presets[preset_num]['cm360']
+        self.apply_sensitivity(cm_value)
+        
+        # Update button colors
+        for num, btn in self.sens_buttons.items():
+            if num == preset_num:
+                btn.config(bg="#00aa00")  # Highlight selected
+            else:
+                btn.config(bg="#444444")  # Default color
         
     def select_mode(self, mode):
         """Select game mode"""
@@ -255,16 +302,19 @@ class AimExercise:
         # Update title
         if mode == 'random':
             self.title.config(text="Random Targets Mode", font=("Arial", 20, "bold"))
-            self.stats_label.config(text="Press START to begin | ESC to exit")
+            self.stats_label.config(text="Press START to begin | M for menu | ESC to exit")
         elif mode == 'shapes':
             self.title.config(text="Shape Tracking Mode", font=("Arial", 20, "bold"))
-            self.stats_label.config(text="Complete 10 shapes | Press START to begin | ESC to exit")
+            self.stats_label.config(text="Complete 10 shapes | Press START | M for menu | ESC to exit")
         elif mode == 'tracking':
             self.title.config(text="Tracking Practice Mode", font=("Arial", 20, "bold"))
-            self.stats_label.config(text="Keep crosshair on targets to degrade them | 60 seconds | ESC to exit")
+            self.stats_label.config(text="Keep crosshair on targets | 60 seconds | M for menu | ESC to exit")
         
         # Show control buttons
         self.button_frame.pack(pady=10)
+        
+        # Show sensitivity frame
+        self.sens_frame.pack(pady=5)
         
         # Show canvas
         self.canvas.pack(pady=5)
@@ -276,33 +326,11 @@ class AimExercise:
         
         self.game_mode = None
         self.button_frame.pack_forget()
+        self.sens_frame.pack_forget()
         self.canvas.pack_forget()
         self.title.config(text="FPS Aim Trainer - Select Your Mode", font=("Arial", 24, "bold"))
         self.stats_label.config(text="Select a mode to begin")
         self.mode_frame.pack(pady=20)
-    
-    def toggle_sensitivity_match(self):
-        """Toggle between matched and independent sensitivities"""
-        self.match_sensitivities = not self.match_sensitivities
-        
-        if self.match_sensitivities:
-            # Match Y sensitivity to X (same cm/360 feel accounting for different DPI)
-            # X: 1000 DPI at 29.39 cm/360 = certain counts_per_degree
-            # Y: 1250 DPI needs to achieve the same counts_per_degree
-            # So we just use the same counts_per_degree value
-            self.v_counts_per_degree = self.h_counts_per_degree
-            
-            self.sens_toggle_btn.config(
-                text="Y = X SENS ✓",
-                bg="#00aa00"
-            )
-        else:
-            # Restore original vertical sensitivity
-            self.v_counts_per_degree = self.original_v_counts_per_degree
-            self.sens_toggle_btn.config(
-                text="MATCH Y SENS",
-                bg="#0066aa"
-            )
         
     def start_exercise(self):
         """Start the aim exercise"""
@@ -317,6 +345,7 @@ class AimExercise:
         # Hide UI elements
         self.title.pack_forget()
         self.button_frame.pack_forget()
+        self.sens_frame.pack_forget()
         self.stats_label.pack_forget()
         
         # Expand canvas to full screen
@@ -373,6 +402,7 @@ class AimExercise:
         self.canvas.pack_forget()
         self.title.pack(pady=10)
         self.button_frame.pack(pady=10)
+        self.sens_frame.pack(pady=5)
         self.stats_label.pack(pady=5)
         
         # Restore canvas size
@@ -608,19 +638,19 @@ class AimExercise:
         target_yaw = self.yaw + yaw_offset
         target_pitch = self.pitch + pitch_offset
         
-        # Random velocity (degrees per second)
-        speed = random.uniform(15, 35)  # Degrees per second
-        angle = random.uniform(0, 2 * math.pi)
-        vel_yaw = math.cos(angle) * speed
-        vel_pitch = math.sin(angle) * speed
+        # Horizontal velocity (left or right)
+        speed = random.uniform(0.9, 2.4)  # Degrees per second
+        direction = random.choice([-1, 1])  # Left or right
+        vel_yaw = direction * speed
+        vel_pitch = random.uniform(-0.3, 0.3)  # Slight vertical drift
         
-        # Target properties: yaw, pitch, vel_yaw, vel_pitch, health (0-100), size
+        # Target properties: yaw, pitch, vel_yaw, vel_pitch, health (0-400), size
         target = {
             'yaw': target_yaw,
             'pitch': target_pitch,
             'vel_yaw': vel_yaw,
             'vel_pitch': vel_pitch,
-            'health': 100.0,
+            'health': 400.0,
             'size': 40,
             'last_update': time.time()
         }
@@ -689,12 +719,10 @@ class AimExercise:
                 if target['health'] <= 0:
                     targets_to_remove.append(target)
             
-            # Randomly change direction occasionally
-            if random.random() < 0.02:  # 2% chance per frame
-                angle = random.uniform(0, 2 * math.pi)
-                speed = math.sqrt(target['vel_yaw']**2 + target['vel_pitch']**2)
-                target['vel_yaw'] = math.cos(angle) * speed
-                target['vel_pitch'] = math.sin(angle) * speed
+            # Randomly swap horizontal direction
+            if random.random() < 0.004:  # 0.4% chance per frame
+                target['vel_yaw'] *= -1  # Reverse horizontal direction
+                target['vel_pitch'] = random.uniform(-0.3, 0.3)  # New slight vertical drift
         
         # Remove destroyed targets and spawn new ones
         for target in targets_to_remove:
@@ -799,6 +827,10 @@ class AimExercise:
             
             if avg_time > 0:
                 stats_text += f" | Avg Time: {avg_time:.3f}s"
+            
+            # Show current sensitivity
+            current_fn_sens = self.sensitivity_presets[self.current_preset]['fn_sens']
+            stats_text += f" | Sens: {current_fn_sens}"
             
             # Add message if mouse is unlocked
             if not self.mouse_locked and self.mouse_was_locked:
@@ -1005,22 +1037,22 @@ class AimExercise:
                 if (0 <= target_screen_x <= self.canvas_width and 
                     0 <= target_screen_y <= self.canvas_height):
                     
-                    # Calculate color based on health (green at 100, yellow at 50, red at 0)
+                    # Calculate color based on health (green at 400, yellow at 200, red at 0)
                     health = target['health']
-                    if health > 50:
-                        # Green to yellow (100->50)
-                        ratio = (health - 50) / 50
+                    if health > 200:
+                        # Green to yellow (400->200)
+                        ratio = (health - 200) / 200
                         red = int(255 * (1 - ratio))
                         green = 255
                     else:
-                        # Yellow to red (50->0)
-                        ratio = health / 50
+                        # Yellow to red (200->0)
+                        ratio = health / 200
                         red = 255
                         green = int(255 * ratio)
                     target_color = f'#{red:02x}{green:02x}00'
                     
                     # Size based on health (shrinks as health decreases)
-                    current_size = target['size'] * (0.5 + 0.5 * (health / 100))
+                    current_size = target['size'] * (0.5 + 0.5 * (health / 400))
                     
                     # Draw target
                     self.canvas.create_oval(
@@ -1050,7 +1082,7 @@ class AimExercise:
                     )
                     
                     # Health fill
-                    fill_width = (health / 100) * bar_width
+                    fill_width = (health / 400) * bar_width
                     if fill_width > 0:
                         self.canvas.create_rectangle(
                             bar_x, bar_y,
