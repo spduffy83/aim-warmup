@@ -33,7 +33,24 @@ class AimExercise:
             5: {'cm360': 25.72, 'fn_sens': '6.4%'},
             6: {'cm360': 24.57, 'fn_sens': '6.7%'}
         }
-        self.current_preset = 5  # Default to preset 5 (Fortnite 6.4%)
+        self.current_preset = 6  # Default to preset 6 (Fortnite 6.7%) - fastest
+        
+        # Y sensitivity offset options (added to X Fortnite sens %)
+        # Higher Fortnite % = faster (less cm/360)
+        self.y_sens_options = {
+            0: {'label': 'Same', 'offset': None},  # None means match X
+            1: {'label': '+1.0', 'offset': 1.0},
+            2: {'label': '+1.3', 'offset': 1.3},
+            3: {'label': '+1.6', 'offset': 1.6},
+            4: {'label': '+1.9', 'offset': 1.9},
+            5: {'label': '+2.2', 'offset': 2.2},
+            6: {'label': '+2.5', 'offset': 2.5}
+        }
+        self.current_y_option = 0  # Default to "Same as X"
+        
+        # Constant for Fortnite sens to cm/360 conversion
+        # Fortnite_sens% * cm_per_360 ≈ 164.6
+        self.fn_sens_constant = 164.6
         
         # Apply initial sensitivity
         self.apply_sensitivity(self.sensitivity_presets[self.current_preset]['cm360'])
@@ -47,14 +64,7 @@ class AimExercise:
         self.num_targets = 5  # Number of simultaneous targets
         
         # Game mode
-        self.game_mode = None  # Will be 'random', 'shapes', or 'tracking'
-        
-        # Shape tracking mode variables
-        self.current_shape = []  # List of target positions for current shape
-        self.current_shape_index = 0  # Which target in the shape to hit next
-        self.shapes_completed = 0
-        self.total_shapes = 10
-        self.shape_types = ['square', 'triangle', 'circle', 'diamond', 'pentagon']
+        self.game_mode = None  # Will be 'random' or 'tracking'
         
         # Tracking mode variables
         self.tracking_targets = []  # List of tracking target objects
@@ -92,14 +102,26 @@ class AimExercise:
         self.setup_ui()
     
     def apply_sensitivity(self, cm_per_360):
-        """Apply sensitivity setting (same for both horizontal and vertical)"""
+        """Apply sensitivity setting with optional Y offset"""
         # Horizontal sensitivity calculations
         h_inches_per_360 = cm_per_360 / 2.54
         h_counts_per_360 = h_inches_per_360 * self.h_dpi
         self.h_counts_per_degree = h_counts_per_360 / 360.0
         
-        # Vertical sensitivity calculations (same cm/360)
-        v_inches_per_360 = cm_per_360 / 2.54
+        # Vertical sensitivity calculations (apply Y offset if set)
+        y_option = self.y_sens_options[self.current_y_option]
+        if y_option['offset'] is None:
+            # Same as X
+            v_cm_per_360 = cm_per_360
+        else:
+            # Get current X Fortnite sens %
+            x_fn_sens = float(self.sensitivity_presets[self.current_preset]['fn_sens'].replace('%', ''))
+            # Add offset to get Y Fortnite sens %
+            y_fn_sens = x_fn_sens + y_option['offset']
+            # Convert to cm/360 (higher % = less cm = faster)
+            v_cm_per_360 = self.fn_sens_constant / y_fn_sens
+        
+        v_inches_per_360 = v_cm_per_360 / 2.54
         v_counts_per_360 = v_inches_per_360 * self.v_dpi
         self.v_counts_per_degree = v_counts_per_360 / 360.0
         
@@ -132,20 +154,6 @@ class AimExercise:
             relief=tk.FLAT
         )
         self.random_mode_btn.pack(side=tk.LEFT, padx=15)
-        
-        # Shape tracking mode button
-        self.shapes_mode_btn = tk.Button(
-            self.mode_frame,
-            text="SHAPE TRACKING\n\nFollow geometric patterns\nComplete 10 shapes",
-            command=lambda: self.select_mode('shapes'),
-            font=("Arial", 14, "bold"),
-            bg="#cc6600",
-            fg="white",
-            width=25,
-            height=5,
-            relief=tk.FLAT
-        )
-        self.shapes_mode_btn.pack(side=tk.LEFT, padx=15)
         
         # Tracking practice mode button
         self.tracking_mode_btn = tk.Button(
@@ -217,11 +225,11 @@ class AimExercise:
         )
         self.back_btn.pack(side=tk.LEFT, padx=10)
         
-        # Sensitivity preset buttons frame
+        # Sensitivity preset buttons frame (X - horizontal)
         self.sens_frame = tk.Frame(self.root, bg="#1a1a1a")
         self.sens_label = tk.Label(
             self.sens_frame,
-            text="Fortnite Sens:",
+            text="X Sens:",
             font=("Arial", 11),
             bg="#1a1a1a",
             fg="#aaaaaa"
@@ -244,6 +252,34 @@ class AimExercise:
             )
             btn.pack(side=tk.LEFT, padx=3)
             self.sens_buttons[preset_num] = btn
+        
+        # Y sensitivity multiplier buttons frame
+        self.y_sens_frame = tk.Frame(self.root, bg="#1a1a1a")
+        self.y_sens_label = tk.Label(
+            self.y_sens_frame,
+            text="Y Sens:",
+            font=("Arial", 11),
+            bg="#1a1a1a",
+            fg="#aaaaaa"
+        )
+        self.y_sens_label.pack(side=tk.LEFT, padx=(0, 10))
+        
+        # Create Y sensitivity option buttons
+        self.y_sens_buttons = {}
+        for option_num, option_data in self.y_sens_options.items():
+            btn = tk.Button(
+                self.y_sens_frame,
+                text=option_data['label'],
+                command=lambda o=option_num: self.set_y_sensitivity(o),
+                font=("Arial", 11, "bold"),
+                bg="#00aa00" if option_num == self.current_y_option else "#444444",
+                fg="white",
+                width=6,
+                height=1,
+                relief=tk.FLAT
+            )
+            btn.pack(side=tk.LEFT, padx=3)
+            self.y_sens_buttons[option_num] = btn
         
         # Stats display
         self.stats_label = tk.Label(
@@ -291,6 +327,20 @@ class AimExercise:
                 btn.config(bg="#00aa00")  # Highlight selected
             else:
                 btn.config(bg="#444444")  # Default color
+    
+    def set_y_sensitivity(self, option_num):
+        """Set the Y sensitivity multiplier"""
+        self.current_y_option = option_num
+        # Re-apply sensitivity with new Y multiplier
+        cm_value = self.sensitivity_presets[self.current_preset]['cm360']
+        self.apply_sensitivity(cm_value)
+        
+        # Update button colors
+        for num, btn in self.y_sens_buttons.items():
+            if num == option_num:
+                btn.config(bg="#00aa00")  # Highlight selected
+            else:
+                btn.config(bg="#444444")  # Default color
         
     def select_mode(self, mode):
         """Select game mode"""
@@ -303,9 +353,6 @@ class AimExercise:
         if mode == 'random':
             self.title.config(text="Random Targets Mode", font=("Arial", 20, "bold"))
             self.stats_label.config(text="Press START to begin | M for menu | ESC to exit")
-        elif mode == 'shapes':
-            self.title.config(text="Shape Tracking Mode", font=("Arial", 20, "bold"))
-            self.stats_label.config(text="Complete 10 shapes | Press START | M for menu | ESC to exit")
         elif mode == 'tracking':
             self.title.config(text="Tracking Practice Mode", font=("Arial", 20, "bold"))
             self.stats_label.config(text="Keep crosshair on targets | 60 seconds | M for menu | ESC to exit")
@@ -313,8 +360,9 @@ class AimExercise:
         # Show control buttons
         self.button_frame.pack(pady=10)
         
-        # Show sensitivity frame
+        # Show sensitivity frames
         self.sens_frame.pack(pady=5)
+        self.y_sens_frame.pack(pady=5)
         
         # Show canvas
         self.canvas.pack(pady=5)
@@ -327,6 +375,7 @@ class AimExercise:
         self.game_mode = None
         self.button_frame.pack_forget()
         self.sens_frame.pack_forget()
+        self.y_sens_frame.pack_forget()
         self.canvas.pack_forget()
         self.title.config(text="FPS Aim Trainer - Select Your Mode", font=("Arial", 24, "bold"))
         self.stats_label.config(text="Select a mode to begin")
@@ -346,6 +395,7 @@ class AimExercise:
         self.title.pack_forget()
         self.button_frame.pack_forget()
         self.sens_frame.pack_forget()
+        self.y_sens_frame.pack_forget()
         self.stats_label.pack_forget()
         
         # Expand canvas to full screen
@@ -366,10 +416,6 @@ class AimExercise:
         self.path_points = []
         self.has_last_hit = False
         
-        # Reset shape mode variables
-        self.shapes_completed = 0
-        self.current_shape_index = 0
-        
         # Store last mouse position for delta calculation
         pos = self.mouse.position
         self.last_mouse_x = pos[0]
@@ -379,8 +425,6 @@ class AimExercise:
         if self.game_mode == 'random':
             for _ in range(self.num_targets):
                 self.spawn_target()
-        elif self.game_mode == 'shapes':
-            self.spawn_shape()
         elif self.game_mode == 'tracking':
             self.tracking_start_time = time.time()
             self.tracking_time_on_target = 0.0
@@ -403,6 +447,7 @@ class AimExercise:
         self.title.pack(pady=10)
         self.button_frame.pack(pady=10)
         self.sens_frame.pack(pady=5)
+        self.y_sens_frame.pack(pady=5)
         self.stats_label.pack(pady=5)
         
         # Restore canvas size
@@ -475,91 +520,6 @@ class AimExercise:
             # Schedule next check
             self.root.after(1, self.lock_mouse_loop)
     
-    def spawn_shape(self):
-        """Spawn a geometric shape pattern"""
-        if not self.is_active:
-            return
-        
-        # Choose random shape type
-        shape_type = random.choice(self.shape_types)
-        
-        # Random center position on screen
-        center_screen_x = self.canvas_width // 2 + random.uniform(-300, 300)
-        center_screen_y = self.canvas_height // 2 + random.uniform(-250, 250)
-        
-        # Shape size in pixels (larger shapes)
-        shape_size = random.uniform(300, 500)
-        
-        # Generate target positions based on shape type
-        shape_targets = []
-        
-        if shape_type == 'square':
-            # 4 corners of a square
-            offsets = [
-                (-shape_size/2, -shape_size/2),
-                (shape_size/2, -shape_size/2),
-                (shape_size/2, shape_size/2),
-                (-shape_size/2, shape_size/2)
-            ]
-        elif shape_type == 'triangle':
-            # 3 points of equilateral triangle
-            offsets = [
-                (0, -shape_size * 0.6),
-                (-shape_size/2, shape_size * 0.3),
-                (shape_size/2, shape_size * 0.3)
-            ]
-        elif shape_type == 'circle':
-            # 8 points around a circle
-            offsets = []
-            for i in range(8):
-                angle = (i * 360 / 8) * (math.pi / 180)
-                offsets.append((
-                    math.cos(angle) * shape_size/2,
-                    math.sin(angle) * shape_size/2
-                ))
-        elif shape_type == 'diamond':
-            # 4 points of diamond
-            offsets = [
-                (0, -shape_size/2),
-                (shape_size/2, 0),
-                (0, shape_size/2),
-                (-shape_size/2, 0)
-            ]
-        elif shape_type == 'pentagon':
-            # 5 points of pentagon
-            offsets = []
-            for i in range(5):
-                angle = (i * 360 / 5 - 90) * (math.pi / 180)
-                offsets.append((
-                    math.cos(angle) * shape_size/2,
-                    math.sin(angle) * shape_size/2
-                ))
-        
-        # Convert screen offsets to world angles
-        center_x = self.canvas_width // 2
-        center_y = self.canvas_height // 2
-        
-        for offset_x, offset_y in offsets:
-            screen_x = center_screen_x + offset_x
-            screen_y = center_screen_y + offset_y
-            
-            # Convert to angular offset
-            pixel_offset_x = screen_x - center_x
-            pixel_offset_y = screen_y - center_y
-            
-            yaw_offset = pixel_offset_x / self.pixels_per_degree
-            pitch_offset = -pixel_offset_y / self.pixels_per_degree
-            
-            target_yaw = self.yaw + yaw_offset
-            target_pitch = self.pitch + pitch_offset
-            target_pitch = max(-89, min(89, target_pitch))
-            
-            shape_targets.append((target_yaw, target_pitch, time.time()))
-        
-        self.current_shape = shape_targets
-        self.current_shape_index = 0
-        self.targets = [self.current_shape[0]]  # Start with first target
-            
     def calculate_path_efficiency(self, target_yaw, target_pitch):
         """Calculate how efficiently the cursor moved from last hit to this target"""
         if len(self.path_points) < 2 or not self.has_last_hit:
@@ -814,8 +774,6 @@ class AimExercise:
                 avg_efficiency = self.get_average_path_efficiency()
                 if avg_efficiency > 0:
                     stats_text += f" | Path Efficiency: {avg_efficiency:.1f}%"
-            elif self.game_mode == 'shapes':
-                stats_text = f"Shape: {self.shapes_completed + 1}/{self.total_shapes} | Target: {self.current_shape_index + 1}/{len(self.current_shape)} | Hits: {self.stats.hits} | Misses: {self.stats.misses}"
             elif self.game_mode == 'tracking':
                 elapsed = time.time() - self.tracking_start_time
                 remaining = max(0, self.tracking_duration - elapsed)
@@ -828,9 +786,16 @@ class AimExercise:
             if avg_time > 0:
                 stats_text += f" | Avg Time: {avg_time:.3f}s"
             
-            # Show current sensitivity
+            # Show current sensitivity (X and Y)
             current_fn_sens = self.sensitivity_presets[self.current_preset]['fn_sens']
-            stats_text += f" | Sens: {current_fn_sens}"
+            x_fn_val = float(current_fn_sens.replace('%', ''))
+            y_option = self.y_sens_options[self.current_y_option]
+            if y_option['offset'] is None:
+                y_display = "Same"
+            else:
+                y_fn_val = x_fn_val + y_option['offset']
+                y_display = f"{y_fn_val:.1f}%"
+            stats_text += f" | X: {current_fn_sens} Y: {y_display}"
             
             # Add message if mouse is unlocked
             if not self.mouse_locked and self.mouse_was_locked:
@@ -898,9 +863,6 @@ class AimExercise:
                         tags="trail"
                     )
         
-        # Draw crosshair in center (your aim point) - REMOVED, using third-party crosshair
-        # Crosshair code removed
-        
         # Draw all targets
         targets_on_screen = []
         for idx, (target_yaw, target_pitch, spawn_time) in enumerate(self.targets):
@@ -938,12 +900,7 @@ class AimExercise:
                 
                 targets_on_screen.append((target_yaw, target_pitch, spawn_time))
                 
-                # In shapes mode, make active target brighter
-                if self.game_mode == 'shapes' and idx == 0:
-                    target_color = "#ff4444"  # Bright red for active
-                    outline_color = "#ffaa00"  # Orange outline instead of yellow
-                    outline_width = 4
-                elif self.game_mode == 'random':
+                if self.game_mode == 'random':
                     # Fade from purple to blue over lifetime
                     shrink_progress = target_age / self.target_lifetime  # 0 to 1
                     # Purple (148, 0, 211) to Blue (0, 100, 255)
@@ -979,39 +936,6 @@ class AimExercise:
                     fill="#ffffff",
                     tags="target"
                 )
-        
-        # In shapes mode, also draw the full shape outline (ghost targets)
-        if self.game_mode == 'shapes' and self.current_shape:
-            for idx, (target_yaw, target_pitch, _) in enumerate(self.current_shape):
-                # Skip already hit targets and current target
-                if idx < self.current_shape_index:
-                    continue
-                if idx == self.current_shape_index:
-                    continue  # Already drawn above
-                
-                yaw_diff = target_yaw - self.yaw
-                pitch_diff = target_pitch - self.pitch
-                
-                while yaw_diff > 180:
-                    yaw_diff -= 360
-                while yaw_diff < -180:
-                    yaw_diff += 360
-                
-                target_screen_x = center_x + (yaw_diff * self.pixels_per_degree)
-                target_screen_y = center_y - (pitch_diff * self.pixels_per_degree)
-                
-                # Draw ghost target
-                if (0 <= target_screen_x <= self.canvas_width and 
-                    0 <= target_screen_y <= self.canvas_height):
-                    self.canvas.create_oval(
-                        target_screen_x - self.target_size,
-                        target_screen_y - self.target_size,
-                        target_screen_x + self.target_size,
-                        target_screen_y + self.target_size,
-                        outline="#666666",
-                        width=2,
-                        tags="ghost_target"
-                    )
         
         # Update targets list (for random mode to respawn)
         if self.game_mode == 'random':
@@ -1108,8 +1032,6 @@ class AimExercise:
         
         if self.game_mode == 'random':
             self.handle_random_mode_shot()
-        else:  # shapes mode
-            self.handle_shapes_mode_shot()
     
     def handle_random_mode_shot(self):
         """Handle shooting in random targets mode"""
@@ -1158,54 +1080,6 @@ class AimExercise:
             self.spawn_target()
             self.update_stats_display()
         else:
-            self.stats.record_miss()
-            self.update_stats_display()
-    
-    def handle_shapes_mode_shot(self):
-        """Handle shooting in shape tracking mode"""
-        if not self.targets:
-            return
-        
-        # Only check the current target in sequence
-        target_yaw, target_pitch, spawn_time = self.targets[0]
-        
-        yaw_diff = target_yaw - self.yaw
-        pitch_diff = target_pitch - self.pitch
-        
-        while yaw_diff > 180:
-            yaw_diff -= 360
-        while yaw_diff < -180:
-            yaw_diff += 360
-        
-        angular_distance = math.sqrt(yaw_diff**2 + pitch_diff**2)
-        target_angular_size = self.target_size / self.pixels_per_degree
-        
-        if angular_distance <= target_angular_size:
-            # Hit the correct target
-            reaction_time = time.time() - spawn_time
-            self.stats.record_hit(reaction_time)
-            
-            # Move to next target in shape
-            self.current_shape_index += 1
-            
-            if self.current_shape_index >= len(self.current_shape):
-                # Completed the shape
-                self.shapes_completed += 1
-                
-                if self.shapes_completed >= self.total_shapes:
-                    # Finished all shapes
-                    self.stop_exercise()
-                    return
-                
-                # Spawn new shape
-                self.spawn_shape()
-            else:
-                # Move to next target in current shape
-                self.targets = [self.current_shape[self.current_shape_index]]
-            
-            self.update_stats_display()
-        else:
-            # Missed
             self.stats.record_miss()
             self.update_stats_display()
     
