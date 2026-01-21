@@ -4,6 +4,15 @@ import time
 import math
 from pynput.mouse import Controller as MouseController
 
+# Try to import pygame for sound effects
+try:
+    import pygame
+    pygame.mixer.init(frequency=22050, size=-16, channels=1, buffer=512)
+    SOUND_ENABLED = True
+except ImportError:
+    SOUND_ENABLED = False
+    print("pygame not found - sounds disabled. Install with: pip install pygame")
+
 class AimExercise:
     def __init__(self, root, stats_tracker, screen_width, screen_height, 
                  h_dpi=1000, h_cm_per_360=31.058,
@@ -89,6 +98,9 @@ class AimExercise:
         self.path_efficiencies = []  # List of efficiency percentages for averaging
         self.has_last_hit = False  # Whether we have a previous hit to measure from
         
+        # Hit precision tracking (how close to center)
+        self.hit_precisions = []  # List of precision percentages (100% = center)
+        
         # Mouse controller
         self.mouse = MouseController()
         self.center_x = screen_width // 2
@@ -97,6 +109,15 @@ class AimExercise:
         # FOV settings for projection
         self.fov = 90  # Field of view in degrees
         self.pixels_per_degree = screen_width / self.fov
+        
+        # Generate sound effects
+        self.sounds = {}
+        if SOUND_ENABLED:
+            try:
+                self.generate_sounds()
+            except Exception as e:
+                print(f"Sound generation failed: {e} - sounds disabled")
+                self.sounds = {}
         
         # Create UI
         self.setup_ui()
@@ -124,7 +145,63 @@ class AimExercise:
         v_inches_per_360 = v_cm_per_360 / 2.54
         v_counts_per_360 = v_inches_per_360 * self.v_dpi
         self.v_counts_per_degree = v_counts_per_360 / 360.0
+    
+    def generate_sounds(self):
+        """Generate procedural sound effects"""
+        import numpy as np
+        import struct
         
+        sample_rate = 22050
+        
+        def make_sound_from_wave(wave_data):
+            """Convert numpy wave to pygame Sound using bytes"""
+            # Normalize and convert to 16-bit signed integers
+            wave_int = (wave_data * 32767).astype(np.int16)
+            # Convert to bytes
+            raw_bytes = wave_int.tobytes()
+            # Create sound from buffer
+            return pygame.mixer.Sound(buffer=raw_bytes)
+        
+        # Fire sound - short click/pop
+        duration = 0.05
+        t = np.linspace(0, duration, int(sample_rate * duration), False)
+        fire_wave = np.sin(2 * np.pi * 800 * t) * np.exp(-t * 60) * 0.5
+        self.sounds['fire'] = make_sound_from_wave(fire_wave)
+        self.sounds['fire'].set_volume(0.3)
+        
+        # Hit sound - satisfying pop with harmonics
+        duration = 0.15
+        t = np.linspace(0, duration, int(sample_rate * duration), False)
+        hit_wave = (np.sin(2 * np.pi * 600 * t) + 
+                    0.5 * np.sin(2 * np.pi * 900 * t) +
+                    0.3 * np.sin(2 * np.pi * 1200 * t))
+        hit_wave = hit_wave * np.exp(-t * 20) * 0.3
+        self.sounds['hit'] = make_sound_from_wave(hit_wave)
+        self.sounds['hit'].set_volume(0.3)
+        
+        # Miss/expire sound - descending tone
+        duration = 0.2
+        t = np.linspace(0, duration, int(sample_rate * duration), False)
+        freq = 400 - 200 * t / duration  # Descending from 400 to 200 Hz
+        miss_wave = np.sin(2 * np.pi * freq * t) * np.exp(-t * 10) * 0.3
+        self.sounds['miss'] = make_sound_from_wave(miss_wave)
+        self.sounds['miss'].set_volume(0.3)
+        
+        # Tracking target destroyed - rising triumphant sound
+        duration = 0.25
+        t = np.linspace(0, duration, int(sample_rate * duration), False)
+        freq = 500 + 300 * t / duration  # Rising from 500 to 800 Hz
+        destroy_wave = (np.sin(2 * np.pi * freq * t) + 
+                        0.4 * np.sin(2 * np.pi * freq * 1.5 * t))
+        destroy_wave = destroy_wave * np.exp(-t * 8) * 0.3
+        self.sounds['destroy'] = make_sound_from_wave(destroy_wave)
+        self.sounds['destroy'].set_volume(0.3)
+    
+    def play_sound(self, sound_name):
+        """Play a sound effect (only when game has focus)"""
+        if SOUND_ENABLED and sound_name in self.sounds and self.mouse_locked:
+            self.sounds[sound_name].play()
+    
     def setup_ui(self):
         """Setup the exercise UI"""
         # Title
@@ -415,6 +492,7 @@ class AimExercise:
         self.path_efficiencies = []  # Reset path tracking
         self.path_points = []
         self.has_last_hit = False
+        self.hit_precisions = []  # Reset hit precision tracking
         
         # Store last mouse position for delta calculation
         pos = self.mouse.position
@@ -462,6 +540,9 @@ class AimExercise:
     def reset_stats(self):
         """Reset statistics"""
         self.stats.reset()
+        self.path_efficiencies = []
+        self.hit_precisions = []
+        self.has_last_hit = False
         self.update_stats_display()
         
     def lock_mouse_loop(self):
@@ -576,6 +657,12 @@ class AimExercise:
             return 0.0
         return sum(self.path_efficiencies) / len(self.path_efficiencies)
     
+    def get_average_hit_precision(self):
+        """Get average hit precision (100% = center of target)"""
+        if not self.hit_precisions:
+            return 0.0
+        return sum(self.hit_precisions) / len(self.hit_precisions)
+    
     def spawn_tracking_target(self):
         """Spawn a moving target for tracking mode"""
         if not self.is_active:
@@ -686,6 +773,9 @@ class AimExercise:
         
         # Remove destroyed targets and spawn new ones
         for target in targets_to_remove:
+            # Play destroy sound
+            self.play_sound('destroy')
+            
             self.tracking_targets.remove(target)
             self.spawn_tracking_target()
         
@@ -773,7 +863,10 @@ class AimExercise:
                 stats_text = f"Hits: {self.stats.hits} | Misses: {self.stats.misses} | Accuracy: {accuracy:.1f}%"
                 avg_efficiency = self.get_average_path_efficiency()
                 if avg_efficiency > 0:
-                    stats_text += f" | Path Efficiency: {avg_efficiency:.1f}%"
+                    stats_text += f" | Path: {avg_efficiency:.1f}%"
+                avg_precision = self.get_average_hit_precision()
+                if avg_precision > 0:
+                    stats_text += f" | Precision: {avg_precision:.1f}%"
             elif self.game_mode == 'tracking':
                 elapsed = time.time() - self.tracking_start_time
                 remaining = max(0, self.tracking_duration - elapsed)
@@ -884,6 +977,8 @@ class AimExercise:
             if self.game_mode == 'random' and target_age >= self.target_lifetime:
                 # Target expired, don't add to on_screen list (will be removed)
                 self.stats.record_miss()  # Count as miss
+                # Play miss sound
+                self.play_sound('miss')
                 continue
             
             # Calculate shrinking size for random mode
@@ -1030,6 +1125,9 @@ class AimExercise:
         if not self.is_active:
             return
         
+        # Play fire sound
+        self.play_sound('fire')
+        
         if self.game_mode == 'random':
             self.handle_random_mode_shot()
     
@@ -1037,6 +1135,7 @@ class AimExercise:
         """Handle shooting in random targets mode"""
         hit_target = None
         min_distance = float('inf')
+        hit_target_angular_size = 0
         
         # Check each target to see if any were hit
         for i, (target_yaw, target_pitch, spawn_time) in enumerate(self.targets):
@@ -1060,12 +1159,21 @@ class AimExercise:
                 if angular_distance < min_distance:
                     min_distance = angular_distance
                     hit_target = (i, spawn_time)
+                    hit_target_angular_size = target_angular_size
         
         if hit_target is not None:
             target_index, spawn_time = hit_target
             target_yaw, target_pitch, _ = self.targets[target_index]
             reaction_time = time.time() - spawn_time
             self.stats.record_hit(reaction_time)
+            
+            # Calculate hit precision (100% = center, 0% = edge)
+            if hit_target_angular_size > 0:
+                precision = (1 - (min_distance / hit_target_angular_size)) * 100
+                self.hit_precisions.append(precision)
+            
+            # Play hit sound
+            self.play_sound('hit')
             
             # Calculate path efficiency from last hit to this hit
             if self.has_last_hit:
