@@ -42,7 +42,7 @@ class AimExercise:
             5: {'cm360': 25.72, 'fn_sens': '6.4%'},
             6: {'cm360': 24.57, 'fn_sens': '6.7%'}
         }
-        self.current_preset = 6  # Default to preset 6 (Fortnite 6.7%) - fastest
+        self.current_preset = 1  # Default to preset 1 (Fortnite 5.3%)
         
         # Y sensitivity offset options (added to X Fortnite sens %)
         # Higher Fortnite % = faster (less cm/360)
@@ -55,7 +55,7 @@ class AimExercise:
             5: {'label': '+2.2', 'offset': 2.2},
             6: {'label': '+2.5', 'offset': 2.5}
         }
-        self.current_y_option = 0  # Default to "Same as X"
+        self.current_y_option = 6  # Default to "+2.5"
         
         # Constant for Fortnite sens to cm/360 conversion
         # Fortnite_sens% * cm_per_360 ≈ 164.6
@@ -97,6 +97,23 @@ class AimExercise:
         self.path_points = []  # List of (yaw, pitch) points during movement
         self.path_efficiencies = []  # List of efficiency percentages for averaging
         self.has_last_hit = False  # Whether we have a previous hit to measure from
+        
+        # Crosshair styles
+        self.crosshair_styles = {
+            0: {'name': 'None', 'type': 'none', 'outline': False},
+            1: {'name': 'Cross', 'type': 'cross', 'outline': False},
+            2: {'name': 'Cross+', 'type': 'cross', 'outline': True},
+            3: {'name': 'Square', 'type': 'square', 'outline': False},
+            4: {'name': 'Square+', 'type': 'square', 'outline': True},
+            5: {'name': 'Circle', 'type': 'circle', 'outline': False},
+            6: {'name': 'Circle+', 'type': 'circle', 'outline': True}
+        }
+        self.current_crosshair = 0  # Default to no crosshair
+        self.crosshair_color = "#39ff14"  # Neon green
+        self.crosshair_outline_color = "#ff0000"  # Red outline
+        self.crosshair_size = 7  # Size in pixels (75% of original 10)
+        self.crosshair_thickness = 2  # Line thickness
+        self.crosshair_outline_thickness = 1  # Outline thickness
         
         # Hit precision tracking (how close to center)
         self.hit_precisions = []  # List of precision percentages (100% = center)
@@ -358,6 +375,34 @@ class AimExercise:
             btn.pack(side=tk.LEFT, padx=3)
             self.y_sens_buttons[option_num] = btn
         
+        # Crosshair style buttons frame
+        self.crosshair_frame = tk.Frame(self.root, bg="#1a1a1a")
+        self.crosshair_label = tk.Label(
+            self.crosshair_frame,
+            text="Crosshair:",
+            font=("Arial", 11),
+            bg="#1a1a1a",
+            fg="#aaaaaa"
+        )
+        self.crosshair_label.pack(side=tk.LEFT, padx=(0, 10))
+        
+        # Create crosshair style buttons
+        self.crosshair_buttons = {}
+        for style_num, style_data in self.crosshair_styles.items():
+            btn = tk.Button(
+                self.crosshair_frame,
+                text=style_data['name'],
+                command=lambda s=style_num: self.set_crosshair_style(s),
+                font=("Arial", 11, "bold"),
+                bg="#00aa00" if style_num == self.current_crosshair else "#444444",
+                fg="white",
+                width=7,
+                height=1,
+                relief=tk.FLAT
+            )
+            btn.pack(side=tk.LEFT, padx=3)
+            self.crosshair_buttons[style_num] = btn
+        
         # Stats display
         self.stats_label = tk.Label(
             self.root,
@@ -391,6 +436,129 @@ class AimExercise:
         
         # Store initial canvas height
         self.canvas_height_inactive = self.screen_height - 200
+    
+    def set_crosshair_style(self, style_num):
+        """Set the crosshair style"""
+        self.current_crosshair = style_num
+        
+        # Update button colors
+        for num, btn in self.crosshair_buttons.items():
+            if num == style_num:
+                btn.config(bg="#00aa00")  # Highlight selected
+            else:
+                btn.config(bg="#444444")  # Default color
+    
+    def draw_crosshair(self, center_x, center_y):
+        """Draw the crosshair at the specified position"""
+        style = self.crosshair_styles[self.current_crosshair]
+        
+        # No crosshair option
+        if style['type'] == 'none':
+            return
+        
+        size = self.crosshair_size
+        thickness = self.crosshair_thickness
+        outline_thickness = self.crosshair_outline_thickness
+        color = self.crosshair_color
+        outline_color = self.crosshair_outline_color
+        has_outline = style['outline']
+        
+        if style['type'] == 'cross':
+            # Draw cross crosshair
+            if has_outline:
+                # Draw red outline first (slightly larger)
+                outline_size = size + outline_thickness
+                outline_width = thickness + (outline_thickness * 2)
+                # Horizontal outline
+                self.canvas.create_line(
+                    center_x - outline_size, center_y,
+                    center_x + outline_size, center_y,
+                    fill=outline_color,
+                    width=outline_width,
+                    tags="crosshair"
+                )
+                # Vertical outline
+                self.canvas.create_line(
+                    center_x, center_y - outline_size,
+                    center_x, center_y + outline_size,
+                    fill=outline_color,
+                    width=outline_width,
+                    tags="crosshair"
+                )
+            
+            # Draw green cross
+            # Horizontal line
+            self.canvas.create_line(
+                center_x - size, center_y,
+                center_x + size, center_y,
+                fill=color,
+                width=thickness,
+                tags="crosshair"
+            )
+            # Vertical line
+            self.canvas.create_line(
+                center_x, center_y - size,
+                center_x, center_y + size,
+                fill=color,
+                width=thickness,
+                tags="crosshair"
+            )
+        
+        elif style['type'] == 'square':
+            # Draw square crosshair
+            half_size = size
+            
+            if has_outline:
+                # Draw red outline first (slightly larger)
+                outline_offset = outline_thickness
+                self.canvas.create_rectangle(
+                    center_x - half_size - outline_offset,
+                    center_y - half_size - outline_offset,
+                    center_x + half_size + outline_offset,
+                    center_y + half_size + outline_offset,
+                    outline=outline_color,
+                    width=thickness + outline_thickness,
+                    tags="crosshair"
+                )
+            
+            # Draw green square
+            self.canvas.create_rectangle(
+                center_x - half_size,
+                center_y - half_size,
+                center_x + half_size,
+                center_y + half_size,
+                outline=color,
+                width=thickness,
+                tags="crosshair"
+            )
+        
+        elif style['type'] == 'circle':
+            # Draw circle crosshair (hollow)
+            radius = size
+            
+            if has_outline:
+                # Draw red outline first (slightly larger)
+                outline_radius = radius + outline_thickness
+                self.canvas.create_oval(
+                    center_x - outline_radius,
+                    center_y - outline_radius,
+                    center_x + outline_radius,
+                    center_y + outline_radius,
+                    outline=outline_color,
+                    width=thickness + outline_thickness,
+                    tags="crosshair"
+                )
+            
+            # Draw green circle
+            self.canvas.create_oval(
+                center_x - radius,
+                center_y - radius,
+                center_x + radius,
+                center_y + radius,
+                outline=color,
+                width=thickness,
+                tags="crosshair"
+            )
     
     def set_sensitivity_preset(self, preset_num):
         """Set the sensitivity to a preset value"""
@@ -441,6 +609,9 @@ class AimExercise:
         self.sens_frame.pack(pady=5)
         self.y_sens_frame.pack(pady=5)
         
+        # Show crosshair frame
+        self.crosshair_frame.pack(pady=5)
+        
         # Show canvas
         self.canvas.pack(pady=5)
         
@@ -453,6 +624,7 @@ class AimExercise:
         self.button_frame.pack_forget()
         self.sens_frame.pack_forget()
         self.y_sens_frame.pack_forget()
+        self.crosshair_frame.pack_forget()
         self.canvas.pack_forget()
         self.title.config(text="FPS Aim Trainer - Select Your Mode", font=("Arial", 24, "bold"))
         self.stats_label.config(text="Select a mode to begin")
@@ -473,6 +645,7 @@ class AimExercise:
         self.button_frame.pack_forget()
         self.sens_frame.pack_forget()
         self.y_sens_frame.pack_forget()
+        self.crosshair_frame.pack_forget()
         self.stats_label.pack_forget()
         
         # Expand canvas to full screen
@@ -526,6 +699,7 @@ class AimExercise:
         self.button_frame.pack(pady=10)
         self.sens_frame.pack(pady=5)
         self.y_sens_frame.pack(pady=5)
+        self.crosshair_frame.pack(pady=5)
         self.stats_label.pack(pady=5)
         
         # Restore canvas size
@@ -1110,6 +1284,9 @@ class AimExercise:
                             outline="",
                             tags="tracking_target"
                         )
+        
+        # Draw crosshair last (on top of everything)
+        self.draw_crosshair(center_x, center_y)
             
     def on_shoot(self, event):
         """Handle shooting (clicking)"""
