@@ -969,11 +969,13 @@ class AimExercise:
                 self.yaw += delta_x / self.h_counts_per_degree
                 self.pitch -= delta_y / self.v_counts_per_degree
                 
-                # Clamp pitch to prevent over-rotation
-                self.pitch = max(-89, min(89, self.pitch))
-                
-                # Normalize yaw to 0-360
-                self.yaw = self.yaw % 360
+                # Clamp pitch to screen bounds (small range)
+                max_pitch = (self.canvas_height / 2) / self.pixels_per_degree * 0.5
+                self.pitch = max(-max_pitch, min(max_pitch, self.pitch))
+
+                # Clamp yaw to screen bounds (small range) instead of wrapping 360
+                max_yaw = (self.canvas_width / 2) / self.pixels_per_degree * 0.5
+                self.yaw = max(-max_yaw, min(max_yaw, self.yaw))
                 
                 # Add trail point every few milliseconds
                 current_time = time.time()
@@ -1584,43 +1586,24 @@ class AimExercise:
         self.tracking_total_time += delta_time
             
     def spawn_target_at_random_position(self):
-        """Spawn a new target at random position within visible screen bounds"""
+        """Spawn a new target at random position within world bounds"""
         if not self.is_active:
             return
         
-        # Spawn target at a fixed position relative to current view
-        # Calculate safe bounds (80% of screen to ensure fully visible)
-        safe_width = self.canvas_width * 0.8
-        safe_height = self.canvas_height * 0.8
+        # Calculate world bounds (same as camera clamp)
+        max_pitch = (self.canvas_height / 2) / self.pixels_per_degree * 0.5
+        max_yaw = (self.canvas_width / 2) / self.pixels_per_degree * 0.5
         
-        # Random screen position
-        screen_x = (self.canvas_width // 2) + random.uniform(-safe_width/2, safe_width/2)
-        screen_y = (self.canvas_height // 2) + random.uniform(-safe_height/2, safe_height/2)
+        # Spawn within the bounded world space (with margin from edges)
+        margin = 0.85  # Stay within 85% of bounds so targets aren't at very edge
+        target_yaw = random.uniform(-max_yaw * margin, max_yaw * margin)
+        target_pitch = random.uniform(-max_pitch * margin, max_pitch * margin)
         
-        # Convert screen position to angular offset from center
-        center_x = self.canvas_width // 2
-        center_y = self.canvas_height // 2
-        
-        pixel_offset_x = screen_x - center_x
-        pixel_offset_y = screen_y - center_y
-        
-        # Convert pixels to degrees
-        yaw_offset = pixel_offset_x / self.pixels_per_degree
-        pitch_offset = -pixel_offset_y / self.pixels_per_degree
-        
-        # Calculate target world position
-        target_yaw = self.yaw + yaw_offset
-        target_pitch = self.pitch + pitch_offset
-        
-        # Clamp pitch to reasonable bounds
-        target_pitch = max(-89, min(89, target_pitch))
-        
-        # Add to targets list as dict (color will be assigned by assign_target_colors)
         self.targets.append({
             'yaw': target_yaw,
             'pitch': target_pitch,
             'spawn_time': time.time(),
-            'color': 'blue'  # Default, will be reassigned
+            'color': 'blue'
         })
     
     def assign_target_colors(self):
@@ -1639,6 +1622,7 @@ class AimExercise:
         for target in self.targets:
             if target['color'] == 'yellow':
                 target['color'] = 'red'
+                target['spawn_time'] = time.time()  # RESET spawn time so it gets fresh 3 seconds
                 break
         
         # Find a random blue target and make it yellow
@@ -1658,7 +1642,6 @@ class AimExercise:
         if not self.is_active or self.game_mode != 'debug':
             return
         
-        # Clear existing targets
         self.targets = []
         
         # Reset debug visualization
@@ -1671,37 +1654,23 @@ class AimExercise:
         self.debug_x_overshoot_pos = None
         self.debug_y_overshoot_pos = None
         
-        # Reset path tracking for fresh measurement
+        # Reset path tracking
         self.path_points = [(self.yaw, self.pitch)]
-        self.has_last_hit = True  # Pretend we have a last hit so analysis works
+        self.has_last_hit = True
         self.last_hit_yaw = self.yaw
         self.last_hit_pitch = self.pitch
         
-        # Spawn target at a moderate distance
-        safe_width = self.canvas_width * 0.5
-        safe_height = self.canvas_height * 0.5
+        # Calculate world bounds (same as camera clamp)
+        max_pitch = (self.canvas_height / 2) / self.pixels_per_degree * 0.5
+        max_yaw = (self.canvas_width / 2) / self.pixels_per_degree * 0.5
         
-        center_x = self.canvas_width // 2
-        center_y = self.canvas_height // 2
+        # Spawn within bounded world space
+        margin = 0.85
+        target_yaw = random.uniform(-max_yaw * margin, max_yaw * margin)
+        target_pitch = random.uniform(-max_pitch * margin, max_pitch * margin)
         
-        # Random screen position
-        screen_x = center_x + random.uniform(-safe_width/2, safe_width/2)
-        screen_y = center_y + random.uniform(-safe_height/2, safe_height/2)
-        
-        pixel_offset_x = screen_x - center_x
-        pixel_offset_y = screen_y - center_y
-        
-        yaw_offset = pixel_offset_x / self.pixels_per_degree
-        pitch_offset = -pixel_offset_y / self.pixels_per_degree
-        
-        target_yaw = self.yaw + yaw_offset
-        target_pitch = self.pitch + pitch_offset
-        target_pitch = max(-89, min(89, target_pitch))
-        
-        # Add target (spawn_time is ignored in debug mode)
         self.targets.append((target_yaw, target_pitch, time.time()))
         
-        # Clear trail for fresh visualization
         self.trail_points = []
         
     def draw_scene(self):
@@ -2055,15 +2024,25 @@ class AimExercise:
                 )
         
         # Draw all targets
-        targets_on_screen = []
+        # FIXED: Separate expiration logic from drawing logic
+        # Targets persist even when off-screen; only removed on expiration
         red_target_expired = False
         
         if self.game_mode == 'random':
-            # Random mode: dict format with color coding
+            # First: Check for red target expiration (only red can expire)
+            red_target = self.get_red_target()
+            if red_target:
+                target_age = current_time - red_target['spawn_time']
+                if target_age >= self.target_lifetime:
+                    red_target_expired = True
+                    self.stats.record_miss()
+                    self.play_sound('miss')
+                    self.targets.remove(red_target)
+            
+            # Second: Draw all remaining targets (visible ones only, but list unchanged)
             for target in self.targets:
                 target_yaw = target['yaw']
                 target_pitch = target['pitch']
-                spawn_time = target['spawn_time']
                 target_color_name = target['color']
                 
                 yaw_diff = target_yaw - self.yaw
@@ -2077,32 +2056,20 @@ class AimExercise:
                 target_screen_x = center_x + (yaw_diff * self.pixels_per_degree)
                 target_screen_y = center_y - (pitch_diff * self.pixels_per_degree)
                 
-                # Calculate target age
-                target_age = current_time - spawn_time
-                
-                # Only red target can expire
-                if target_color_name == 'red' and target_age >= self.target_lifetime:
-                    red_target_expired = True
-                    self.stats.record_miss()
-                    self.play_sound('miss')
-                    continue
-                
-                # Fixed size (no shrinking)
                 current_target_size = self.target_size
                 
+                # Only DRAW if on screen (but target stays in list regardless)
                 margin = current_target_size + 10
                 if (-margin <= target_screen_x <= self.canvas_width + margin and 
                     -margin <= target_screen_y <= self.canvas_height + margin):
                     
-                    targets_on_screen.append(target)
-                    
                     # Set color based on target type
                     if target_color_name == 'red':
-                        fill_color = "#ff0000"  # Red
+                        fill_color = "#ff0000"
                     elif target_color_name == 'yellow':
-                        fill_color = "#ffff00"  # Yellow
+                        fill_color = "#ffff00"
                     else:
-                        fill_color = "#0066ff"  # Blue
+                        fill_color = "#0066ff"
                     
                     outline_color = "#ffffff"
                     outline_width = 3
@@ -2129,69 +2096,15 @@ class AimExercise:
                         tags="target"
                     )
             
-            # Update targets list and handle expiration
-            self.targets = targets_on_screen
-            
+            # Handle red target expiration - cycle colors and spawn replacement
             if red_target_expired:
-                # Cycle colors and spawn new blue target
                 self.cycle_target_colors()
                 self.spawn_target_at_random_position()
-                # New target is blue by default, which is correct
-                
-                # Reset path for next attempt
                 self.path_points = [(self.yaw, self.pitch)]
             
             # Ensure we always have enough targets
             while len(self.targets) < self.num_targets:
                 self.spawn_target_at_random_position()
-                
-        elif self.game_mode == 'debug':
-            # Debug mode: tuple format (yaw, pitch, spawn_time)
-            for idx, (target_yaw, target_pitch, spawn_time) in enumerate(self.targets):
-                yaw_diff = target_yaw - self.yaw
-                pitch_diff = target_pitch - self.pitch
-                
-                while yaw_diff > 180:
-                    yaw_diff -= 360
-                while yaw_diff < -180:
-                    yaw_diff += 360
-                
-                target_screen_x = center_x + (yaw_diff * self.pixels_per_degree)
-                target_screen_y = center_y - (pitch_diff * self.pixels_per_degree)
-                
-                current_target_size = self.target_size
-                
-                margin = current_target_size + 10
-                if (-margin <= target_screen_x <= self.canvas_width + margin and 
-                    -margin <= target_screen_y <= self.canvas_height + margin):
-                    
-                    targets_on_screen.append((target_yaw, target_pitch, spawn_time))
-                    
-                    # Purple SQUARE target for debug mode
-                    target_color = "#9400d3"
-                    outline_color = "#ffffff"
-                    outline_width = 3
-                    
-                    self.canvas.create_rectangle(
-                        target_screen_x - current_target_size,
-                        target_screen_y - current_target_size,
-                        target_screen_x + current_target_size,
-                        target_screen_y + current_target_size,
-                        fill=target_color,
-                        outline=outline_color,
-                        width=outline_width,
-                        tags="target"
-                    )
-                    
-                    # Draw target center dot
-                    self.canvas.create_oval(
-                        target_screen_x - 5,
-                        target_screen_y - 5,
-                        target_screen_x + 5,
-                        target_screen_y + 5,
-                        fill="#ffffff",
-                        tags="target"
-                    )
         
         # Draw tracking targets
         if self.game_mode == 'tracking':
