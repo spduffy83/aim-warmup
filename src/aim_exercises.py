@@ -21,9 +21,8 @@ class AimExercise:
         self.stats = stats_tracker
         self.screen_width = screen_width
         self.screen_height = screen_height
-        self.target_size = 25  # Base target size
-        self.target_min_size = 15  # Minimum size when pulsing
-        self.target_max_size = 35  # Maximum size when pulsing
+        self.target_size = 35  # Base target size (at spawn)
+        self.target_min_size = 5  # Minimum size before disappearing
         self.target_lifetime = 3.0  # Seconds before target disappears
         self.is_active = False
         self.target_spawn_time = 0
@@ -69,9 +68,9 @@ class AimExercise:
         self.yaw = 0.0
         self.pitch = 0.0
         
-        # Multiple targets - list of (yaw, pitch, spawn_time)
+        # Multiple targets - list of {yaw, pitch, spawn_time}
         self.targets = []
-        self.num_targets = 5  # Number of simultaneous targets
+        self.num_targets = 3  # Number of simultaneous targets
         
         # Game mode
         self.game_mode = None  # Will be 'random' or 'tracking'
@@ -95,11 +94,6 @@ class AimExercise:
         self.trail_points = []  # List of (yaw, pitch, timestamp)
         self.trail_fade_time = 0.5  # Seconds before trail fades completely
         self.last_trail_time = 0  # Track when we last added a trail point
-        
-        # Trail flash effect for overshoot/undershoot feedback
-        self.trail_flash_time = 0  # When flash started
-        self.trail_flash_type = None  # 'over', 'under', 'both', or None
-        self.trail_flash_duration = 0.3  # How long flash lasts (seconds)
         
         # Path efficiency tracking
         self.last_hit_yaw = 0.0  # Position where last target was hit
@@ -318,7 +312,7 @@ class AimExercise:
         # Random targets mode button
         self.random_mode_btn = tk.Button(
             self.mode_frame,
-            text="RANDOM TARGETS\n\nClick 5 targets appearing randomly",
+            text="RANDOM TARGETS\n\nClick shrinking targets\n3 active at once",
             command=lambda: self.select_mode('random'),
             font=("Arial", 14, "bold"),
             bg="#0066cc",
@@ -856,8 +850,6 @@ class AimExercise:
         self.last_shot_analysis = None
         self.last_shot_was_hit = False
         self.last_shot_type = ""
-        self.trail_flash_type = None
-        self.trail_flash_time = 0
         
         # Reset debug/analysis markers (used in both debug and random modes)
         self.debug_x_overshoot_pos = None
@@ -879,12 +871,10 @@ class AimExercise:
         
         # Spawn initial targets based on mode
         if self.game_mode == 'random':
-            # Spawn targets with color coding (red=active, yellow=next, blue=others)
+            # Spawn 3 purple targets
             self.targets = []
             for i in range(self.num_targets):
                 self.spawn_target_at_random_position()
-            # Assign colors: first=red, second=yellow, rest=blue
-            self.assign_target_colors()
         elif self.game_mode == 'tracking':
             self.tracking_start_time = time.time()
             self.tracking_time_on_target = 0.0
@@ -1152,8 +1142,8 @@ class AimExercise:
         # Movement pulse detection
         # A "pulse" is a period of movement after a pause
         # More pulses = more stop-and-go = undershooting
-        pause_threshold = 0.05  # Degrees - below this is considered "stopped"
-        move_threshold = 0.15   # Degrees - above this is considered "moving"
+        pause_threshold = 0.01  # Degrees - below this is considered "stopped"
+        move_threshold = 0.02   # Degrees - above this is considered "moving"
         
         x_is_moving = False
         y_is_moving = False
@@ -1181,7 +1171,7 @@ class AimExercise:
         target_y_dir = 1 if target_y_diff > 0 else -1
         
         # Calculate target angular radius (half-size in degrees)
-        # This is the distance from center to edge
+        # Use current size based on age for more accurate hit detection
         target_angular_radius = self.target_size / self.pixels_per_degree
         
         # Calculate target edges based on approach direction
@@ -1223,13 +1213,13 @@ class AimExercise:
         # Use start of analysis window for reversal/pulse direction
         start_yaw, start_pitch = final_path[0]
         
+        # Analyze the final portion of the path for both reversals and undershoots
         for i in range(1, len(final_path)):
             prev_yaw, prev_pitch = final_path[i - 1]
             curr_yaw, curr_pitch = final_path[i]
             
             # Calculate movement deltas
             dx = curr_yaw - prev_yaw
-            # Handle yaw wraparound
             while dx > 180:
                 dx -= 360
             while dx < -180:
@@ -1240,25 +1230,23 @@ class AimExercise:
             abs_dy = abs(dy)
             
             # Check if cursor has reached the target's NEAR edge yet
-            # Near edge is the edge closest to where we started
             curr_x_diff_to_near = (target_yaw - target_x_dir * target_angular_radius) - curr_yaw
             while curr_x_diff_to_near > 180:
                 curr_x_diff_to_near -= 360
             while curr_x_diff_to_near < -180:
                 curr_x_diff_to_near += 360
             curr_x_side_of_near = 1 if curr_x_diff_to_near > 0 else -1
-            x_reached_target = (curr_x_side_of_near != target_x_dir)  # Passed the near edge
+            x_reached_target = (curr_x_side_of_near != target_x_dir)
             
             curr_y_diff_to_near = (target_pitch - target_y_dir * target_angular_radius) - curr_pitch
             curr_y_side_of_near = 1 if curr_y_diff_to_near > 0 else -1
-            y_reached_target = (curr_y_side_of_near != target_y_dir)  # Passed the near edge
+            y_reached_target = (curr_y_side_of_near != target_y_dir)
             
             # Determine movement direction
             curr_x_dir = 1 if dx > 0.01 else (-1 if dx < -0.01 else 0)
             curr_y_dir = 1 if dy > 0.01 else (-1 if dy < -0.01 else 0)
             
             # Detect X reversals (direction change)
-            # Record the PREVIOUS point as that's where the reversal tip was
             if curr_x_dir != 0 and last_x_dir != 0 and curr_x_dir != last_x_dir:
                 x_reversals += 1
                 if capture_debug:
@@ -1444,29 +1432,6 @@ class AimExercise:
         
         return result
     
-    def trigger_trail_flash(self, approach_data):
-        """
-        Trigger a trail flash based on approach analysis.
-        Yellow = overshoot, Red = undershoot, Orange = both
-        """
-        classification = self.classify_shot(approach_data)
-        
-        # Determine flash type based on combined X and Y
-        has_over = classification['x'] in ('OVER', 'BOTH') or classification['y'] in ('OVER', 'BOTH')
-        has_under = classification['x'] in ('UNDER', 'BOTH') or classification['y'] in ('UNDER', 'BOTH')
-        
-        if has_over and has_under:
-            self.trail_flash_type = 'both'
-        elif has_over:
-            self.trail_flash_type = 'over'
-        elif has_under:
-            self.trail_flash_type = 'under'
-        else:
-            self.trail_flash_type = None  # Good shot, no flash
-            return
-        
-        self.trail_flash_time = time.time()
-    
     def spawn_tracking_target(self):
         """Spawn a moving target for tracking mode"""
         if not self.is_active:
@@ -1586,7 +1551,7 @@ class AimExercise:
         self.tracking_total_time += delta_time
             
     def spawn_target_at_random_position(self):
-        """Spawn a new target at random position within world bounds"""
+        """Spawn a new purple target at random position within world bounds"""
         if not self.is_active:
             return
         
@@ -1602,40 +1567,50 @@ class AimExercise:
         self.targets.append({
             'yaw': target_yaw,
             'pitch': target_pitch,
-            'spawn_time': time.time(),
-            'color': 'blue'
+            'spawn_time': time.time()
         })
     
-    def assign_target_colors(self):
-        """Assign colors to targets: red=active, yellow=next, blue=others"""
-        for i, target in enumerate(self.targets):
-            if i == 0:
-                target['color'] = 'red'
-            elif i == 1:
-                target['color'] = 'yellow'
-            else:
-                target['color'] = 'blue'
-    
-    def cycle_target_colors(self):
-        """Cycle colors after red target is removed: yellow->red, random blue->yellow"""
-        # Find the yellow target and make it red
-        for target in self.targets:
-            if target['color'] == 'yellow':
-                target['color'] = 'red'
-                target['spawn_time'] = time.time()  # RESET spawn time so it gets fresh 3 seconds
-                break
+    def find_closest_target(self):
+        """Find the target closest to the current crosshair position"""
+        if not self.targets:
+            return None, None, float('inf')
         
-        # Find a random blue target and make it yellow
-        blue_targets = [t for t in self.targets if t['color'] == 'blue']
-        if blue_targets:
-            random.choice(blue_targets)['color'] = 'yellow'
+        closest_target = None
+        closest_index = None
+        closest_distance = float('inf')
+        
+        for i, target in enumerate(self.targets):
+            target_yaw = target['yaw']
+            target_pitch = target['pitch']
+            
+            # Calculate angular distance to crosshair
+            yaw_diff = target_yaw - self.yaw
+            while yaw_diff > 180:
+                yaw_diff -= 360
+            while yaw_diff < -180:
+                yaw_diff += 360
+            
+            pitch_diff = target_pitch - self.pitch
+            
+            distance = math.sqrt(yaw_diff**2 + pitch_diff**2)
+            
+            if distance < closest_distance:
+                closest_distance = distance
+                closest_target = target
+                closest_index = i
+        
+        return closest_target, closest_index, closest_distance
     
-    def get_red_target(self):
-        """Get the current red (active) target"""
-        for target in self.targets:
-            if target['color'] == 'red':
-                return target
-        return None
+    def get_target_current_size(self, target):
+        """Get the current size of a target based on its age (shrinks over lifetime)"""
+        current_time = time.time()
+        target_age = current_time - target['spawn_time']
+        
+        # Linear shrink from target_size to target_min_size over lifetime
+        age_ratio = min(target_age / self.target_lifetime, 1.0)
+        current_size = self.target_size - (self.target_size - self.target_min_size) * age_ratio
+        
+        return max(current_size, self.target_min_size)
     
     def spawn_debug_target(self):
         """Spawn a single target for debug mode - doesn't expire"""
@@ -1908,37 +1883,10 @@ class AimExercise:
                 age = current_time - t1
                 opacity = max(0, 1 - (age / self.trail_fade_time))
                 
-                # Check if we're in a flash state
-                flash_active = False
-                if self.trail_flash_type and self.trail_flash_time:
-                    flash_age = current_time - self.trail_flash_time
-                    if flash_age < self.trail_flash_duration:
-                        flash_active = True
-                        flash_intensity = 1 - (flash_age / self.trail_flash_duration)
-                
-                if flash_active:
-                    # Flash colors based on type
-                    if self.trail_flash_type == 'over':
-                        # Yellow flash for overshoot
-                        red = int(255 * flash_intensity)
-                        green = int(255 * flash_intensity)
-                        blue = 0
-                    elif self.trail_flash_type == 'under':
-                        # Orange flash for undershoot
-                        red = int(255 * flash_intensity)
-                        green = int(128 * flash_intensity)
-                        blue = 0
-                    else:  # 'both'
-                        # Red flash for both
-                        red = int(255 * flash_intensity)
-                        green = 0
-                        blue = 0
-                    color = f'#{red:02x}{green:02x}{blue:02x}'
-                else:
-                    # Normal cyan/blue trail
-                    blue_value = int(200 + (55 * opacity))
-                    green_value = int(150 + (105 * opacity))
-                    color = f'#{0:02x}{green_value:02x}{blue_value:02x}'
+                # Normal cyan/blue trail (no flash effect)
+                blue_value = int(200 + (55 * opacity))
+                green_value = int(150 + (105 * opacity))
+                color = f'#{0:02x}{green_value:02x}{blue_value:02x}'
                 
                 # Only draw if on screen
                 if (0 <= x1 <= self.canvas_width and 0 <= y1 <= self.canvas_height and
@@ -2024,26 +1972,25 @@ class AimExercise:
                 )
         
         # Draw all targets
-        # FIXED: Separate expiration logic from drawing logic
-        # Targets persist even when off-screen; only removed on expiration
-        red_target_expired = False
-        
+        # Handle expiration and drawing for random mode
         if self.game_mode == 'random':
-            # First: Check for red target expiration (only red can expire)
-            red_target = self.get_red_target()
-            if red_target:
-                target_age = current_time - red_target['spawn_time']
-                if target_age >= self.target_lifetime:
-                    red_target_expired = True
-                    self.stats.record_miss()
-                    self.play_sound('miss')
-                    self.targets.remove(red_target)
+            targets_to_remove = []
             
-            # Second: Draw all remaining targets (visible ones only, but list unchanged)
+            # Check for expired targets and draw all targets
             for target in self.targets:
                 target_yaw = target['yaw']
                 target_pitch = target['pitch']
-                target_color_name = target['color']
+                target_age = current_time - target['spawn_time']
+                
+                # Check if target expired
+                if target_age >= self.target_lifetime:
+                    targets_to_remove.append(target)
+                    self.stats.record_miss()
+                    self.play_sound('miss')
+                    continue
+                
+                # Calculate current size (shrinks over time)
+                current_target_size = self.get_target_current_size(target)
                 
                 yaw_diff = target_yaw - self.yaw
                 pitch_diff = target_pitch - self.pitch
@@ -2056,21 +2003,13 @@ class AimExercise:
                 target_screen_x = center_x + (yaw_diff * self.pixels_per_degree)
                 target_screen_y = center_y - (pitch_diff * self.pixels_per_degree)
                 
-                current_target_size = self.target_size
-                
                 # Only DRAW if on screen (but target stays in list regardless)
                 margin = current_target_size + 10
                 if (-margin <= target_screen_x <= self.canvas_width + margin and 
                     -margin <= target_screen_y <= self.canvas_height + margin):
                     
-                    # Set color based on target type
-                    if target_color_name == 'red':
-                        fill_color = "#ff0000"
-                    elif target_color_name == 'yellow':
-                        fill_color = "#ffff00"
-                    else:
-                        fill_color = "#0066ff"
-                    
+                    # Purple color for all targets
+                    fill_color = "#9933ff"
                     outline_color = "#ffffff"
                     outline_width = 3
                     
@@ -2088,17 +2027,17 @@ class AimExercise:
                     
                     # Draw target center dot
                     self.canvas.create_oval(
-                        target_screen_x - 5,
-                        target_screen_y - 5,
-                        target_screen_x + 5,
-                        target_screen_y + 5,
+                        target_screen_x - 3,
+                        target_screen_y - 3,
+                        target_screen_x + 3,
+                        target_screen_y + 3,
                         fill="#ffffff",
                         tags="target"
                     )
             
-            # Handle red target expiration - cycle colors and spawn replacement
-            if red_target_expired:
-                self.cycle_target_colors()
+            # Remove expired targets and spawn replacements
+            for target in targets_to_remove:
+                self.targets.remove(target)
                 self.spawn_target_at_random_position()
                 self.path_points = [(self.yaw, self.pitch)]
             
@@ -2419,18 +2358,21 @@ class AimExercise:
             self.handle_debug_mode_shot()
     
     def handle_random_mode_shot(self):
-        """Handle shooting in random targets mode - must hit red target"""
-        # Get the red (active) target
-        red_target = self.get_red_target()
+        """Handle shooting in random targets mode - find closest target to crosshair"""
+        # Find the closest target to crosshair position
+        closest_target, closest_index, closest_distance = self.find_closest_target()
         
-        if not red_target:
+        if not closest_target:
             return
         
-        target_yaw = red_target['yaw']
-        target_pitch = red_target['pitch']
-        spawn_time = red_target['spawn_time']
+        target_yaw = closest_target['yaw']
+        target_pitch = closest_target['pitch']
+        spawn_time = closest_target['spawn_time']
         
-        # Check if we hit the RED target (SQUARE hitbox)
+        # Get current target size (shrinks over time)
+        current_target_size = self.get_target_current_size(closest_target)
+        
+        # Check if we hit the closest target (SQUARE hitbox)
         yaw_diff = target_yaw - self.yaw
         pitch_diff = target_pitch - self.pitch
         
@@ -2439,13 +2381,38 @@ class AimExercise:
         while yaw_diff < -180:
             yaw_diff += 360
         
-        target_angular_size = self.target_size / self.pixels_per_degree
+        target_angular_size = current_target_size / self.pixels_per_degree
         
         # Square hitbox: hit if BOTH X and Y are within target bounds
-        hit_red = (abs(yaw_diff) <= target_angular_size and abs(pitch_diff) <= target_angular_size)
+        hit = (abs(yaw_diff) <= target_angular_size and abs(pitch_diff) <= target_angular_size)
         
-        if hit_red:
-            # HIT the red target
+        # Always analyze approach to the closest target (regardless of hit/miss)
+        if self.has_last_hit:
+            efficiency = self.calculate_path_efficiency(target_yaw, target_pitch)
+            if efficiency is not None:
+                self.path_efficiencies.append(efficiency)
+            
+            # Calculate axis-specific efficiency
+            x_eff, y_eff = self.calculate_axis_efficiency(target_yaw, target_pitch)
+            if x_eff is not None:
+                self.x_efficiencies.append(x_eff)
+            if y_eff is not None:
+                self.y_efficiencies.append(y_eff)
+            
+            # Analyze final approach for overshoot/undershoot patterns
+            approach_data = self.analyze_final_approach(target_yaw, target_pitch, capture_debug=True)
+            if approach_data:
+                self.x_overshoots.append(approach_data['x_reversals'])
+                self.y_overshoots.append(approach_data['y_reversals'])
+                self.x_micro_adjustments.append(approach_data['x_micro_adjustments'])
+                self.y_micro_adjustments.append(approach_data['y_micro_adjustments'])
+                # Store for detailed display
+                self.last_shot_analysis = approach_data
+                self.last_shot_was_hit = hit
+                self.last_shot_type = "HIT" if hit else "MISS"
+        
+        if hit:
+            # HIT the target
             reaction_time = time.time() - spawn_time
             self.stats.record_hit(reaction_time)
             
@@ -2460,66 +2427,20 @@ class AimExercise:
             # Play hit sound
             self.play_sound('hit')
             
-            # Calculate path efficiency from last hit to this hit
-            if self.has_last_hit:
-                efficiency = self.calculate_path_efficiency(target_yaw, target_pitch)
-                if efficiency is not None:
-                    self.path_efficiencies.append(efficiency)
-                
-                # Calculate axis-specific efficiency
-                x_eff, y_eff = self.calculate_axis_efficiency(target_yaw, target_pitch)
-                if x_eff is not None:
-                    self.x_efficiencies.append(x_eff)
-                if y_eff is not None:
-                    self.y_efficiencies.append(y_eff)
-                
-                # Analyze final approach for overshoot/undershoot patterns
-                approach_data = self.analyze_final_approach(target_yaw, target_pitch, capture_debug=True)
-                if approach_data:
-                    self.x_overshoots.append(approach_data['x_reversals'])
-                    self.y_overshoots.append(approach_data['y_reversals'])
-                    self.x_micro_adjustments.append(approach_data['x_micro_adjustments'])
-                    self.y_micro_adjustments.append(approach_data['y_micro_adjustments'])
-                    # Store for detailed display
-                    self.last_shot_analysis = approach_data
-                    self.last_shot_was_hit = True
-                    self.last_shot_type = "HIT"
-                    # Trigger trail flash based on classification
-                    self.trigger_trail_flash(approach_data)
-            
             # Record this hit position for next path measurement
             self.record_hit_position()
             
-            # Remove red target, cycle colors, spawn new blue
-            self.targets.remove(red_target)
-            self.cycle_target_colors()
+            # Remove hit target and spawn a new one
+            self.targets.remove(closest_target)
             self.spawn_target_at_random_position()
-            # New target is blue by default
-            
-            self.update_stats_display()
         else:
-            # MISS - clicked but didn't hit red target (maybe hit yellow/blue or nothing)
+            # MISS - clicked but didn't hit the closest target
             self.stats.record_miss()
-            
-            # Still analyze approach toward the red target
-            if self.has_last_hit:
-                approach_data = self.analyze_final_approach(target_yaw, target_pitch, capture_debug=True)
-                if approach_data:
-                    self.x_overshoots.append(approach_data['x_reversals'])
-                    self.y_overshoots.append(approach_data['y_reversals'])
-                    self.x_micro_adjustments.append(approach_data['x_micro_adjustments'])
-                    self.y_micro_adjustments.append(approach_data['y_micro_adjustments'])
-                    # Store for detailed display
-                    self.last_shot_analysis = approach_data
-                    self.last_shot_was_hit = False
-                    self.last_shot_type = "MISS"
-                    # Trigger trail flash based on classification
-                    self.trigger_trail_flash(approach_data)
             
             # Reset path for next attempt (don't update last_hit position since we missed)
             self.path_points = [(self.yaw, self.pitch)]
-            
-            self.update_stats_display()
+        
+        self.update_stats_display()
     
     def handle_debug_mode_shot(self):
         """Handle shooting in debug test mode"""
@@ -2559,8 +2480,6 @@ class AimExercise:
         
         if approach_data:
             self.last_shot_analysis = approach_data
-            # Trigger trail flash
-            self.trigger_trail_flash(approach_data)
         else:
             # Not enough path data - clear previous analysis
             self.last_shot_analysis = None
