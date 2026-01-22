@@ -61,8 +61,9 @@ class AimExercise:
         # Fortnite_sens% * cm_per_360 ≈ 164.6
         self.fn_sens_constant = 164.6
         
-        # Apply initial sensitivity
-        self.apply_sensitivity(self.sensitivity_presets[self.current_preset]['cm360'])
+        # Current sensitivity values (will be set properly after UI creation)
+        self.current_x_sens = 5.3
+        self.current_y_sens = 7.8  # Default: X + 2.5
         
         # Virtual camera yaw/pitch (in degrees)
         self.yaw = 0.0
@@ -83,6 +84,10 @@ class AimExercise:
         self.tracking_start_time = 0
         self.tracking_duration = 60  # 60 second rounds
         
+        # Session timer (counts up while active and focused)
+        self.session_timer = 0.0  # Total elapsed time in seconds
+        self.last_timer_update = 0  # Timestamp of last timer update
+        
         # Track if mouse was locked before losing focus
         self.mouse_was_locked = False
         
@@ -96,7 +101,16 @@ class AimExercise:
         self.last_hit_pitch = 0.0
         self.path_points = []  # List of (yaw, pitch) points during movement
         self.path_efficiencies = []  # List of efficiency percentages for averaging
+        self.x_efficiencies = []  # X-axis (yaw) efficiency percentages
+        self.y_efficiencies = []  # Y-axis (pitch) efficiency percentages
         self.has_last_hit = False  # Whether we have a previous hit to measure from
+        
+        # Final approach analysis tracking
+        self.x_overshoots = []  # List of X overshoot counts per target
+        self.y_overshoots = []  # List of Y overshoot counts per target
+        self.x_micro_adjustments = []  # List of X micro-adjustment counts
+        self.y_micro_adjustments = []  # List of Y micro-adjustment counts
+        self.approach_analysis_window = 0.3  # Analyze last 30% of path
         
         # Crosshair styles
         self.crosshair_styles = {
@@ -139,29 +153,71 @@ class AimExercise:
         # Create UI
         self.setup_ui()
     
-    def apply_sensitivity(self, cm_per_360):
-        """Apply sensitivity setting with optional Y offset"""
+    def apply_sensitivity(self, x_fn_sens=None, y_fn_sens=None):
+        """Apply sensitivity setting using Fortnite sensitivity percentages"""
+        # Get values from entry fields if not provided
+        if x_fn_sens is None:
+            try:
+                x_fn_sens = float(self.x_sens_var.get())
+            except (ValueError, AttributeError):
+                x_fn_sens = 5.3  # Default
+        
+        if y_fn_sens is None:
+            try:
+                y_fn_sens = float(self.y_sens_var.get())
+            except (ValueError, AttributeError):
+                y_fn_sens = x_fn_sens  # Default to same as X
+        
+        # Clamp values to reasonable range (1% to 20%)
+        x_fn_sens = max(1.0, min(20.0, x_fn_sens))
+        y_fn_sens = max(1.0, min(20.0, y_fn_sens))
+        
+        # Convert Fortnite sens % to cm/360
+        # Fortnite_sens% * cm_per_360 ≈ 164.6
+        x_cm_per_360 = self.fn_sens_constant / x_fn_sens
+        y_cm_per_360 = self.fn_sens_constant / y_fn_sens
+        
         # Horizontal sensitivity calculations
-        h_inches_per_360 = cm_per_360 / 2.54
+        h_inches_per_360 = x_cm_per_360 / 2.54
         h_counts_per_360 = h_inches_per_360 * self.h_dpi
         self.h_counts_per_degree = h_counts_per_360 / 360.0
         
-        # Vertical sensitivity calculations (apply Y offset if set)
-        y_option = self.y_sens_options[self.current_y_option]
-        if y_option['offset'] is None:
-            # Same as X
-            v_cm_per_360 = cm_per_360
-        else:
-            # Get current X Fortnite sens %
-            x_fn_sens = float(self.sensitivity_presets[self.current_preset]['fn_sens'].replace('%', ''))
-            # Add offset to get Y Fortnite sens %
-            y_fn_sens = x_fn_sens + y_option['offset']
-            # Convert to cm/360 (higher % = less cm = faster)
-            v_cm_per_360 = self.fn_sens_constant / y_fn_sens
-        
-        v_inches_per_360 = v_cm_per_360 / 2.54
+        # Vertical sensitivity calculations
+        v_inches_per_360 = y_cm_per_360 / 2.54
         v_counts_per_360 = v_inches_per_360 * self.v_dpi
         self.v_counts_per_degree = v_counts_per_360 / 360.0
+        
+        # Store current values
+        self.current_x_sens = x_fn_sens
+        self.current_y_sens = y_fn_sens
+    
+    def apply_custom_sensitivity(self):
+        """Apply sensitivity from the entry fields"""
+        try:
+            x_val = float(self.x_sens_var.get())
+            # Round to 1 decimal place and update display
+            x_val = round(x_val, 1)
+            self.x_sens_var.set(f"{x_val:.1f}")
+        except ValueError:
+            x_val = 5.3
+            self.x_sens_var.set("5.3")
+        
+        try:
+            y_val = float(self.y_sens_var.get())
+            # Round to 1 decimal place and update display
+            y_val = round(y_val, 1)
+            self.y_sens_var.set(f"{y_val:.1f}")
+        except ValueError:
+            y_val = x_val
+            self.y_sens_var.set(f"{y_val:.1f}")
+        
+        self.apply_sensitivity(x_val, y_val)
+        
+        # Clear preset button highlights since we're using custom values
+        for btn in self.sens_buttons.values():
+            btn.config(bg="#444444")
+        for btn in self.y_sens_buttons.values():
+            btn.config(bg="#444444")
     
     def generate_sounds(self):
         """Generate procedural sound effects"""
@@ -319,10 +375,15 @@ class AimExercise:
         )
         self.back_btn.pack(side=tk.LEFT, padx=10)
         
-        # Sensitivity preset buttons frame (X - horizontal)
+        # Sensitivity controls frame (contains both X and Y)
         self.sens_frame = tk.Frame(self.root, bg="#1a1a1a")
+        
+        # X Sensitivity row
+        self.x_sens_row = tk.Frame(self.sens_frame, bg="#1a1a1a")
+        self.x_sens_row.pack(pady=3)
+        
         self.sens_label = tk.Label(
-            self.sens_frame,
+            self.x_sens_row,
             text="X Sens:",
             font=("Arial", 11),
             bg="#1a1a1a",
@@ -330,27 +391,55 @@ class AimExercise:
         )
         self.sens_label.pack(side=tk.LEFT, padx=(0, 10))
         
-        # Create 6 sensitivity preset buttons
+        # X sensitivity numeric entry
+        self.x_sens_var = tk.StringVar(value="5.3")
+        self.x_sens_entry = tk.Entry(
+            self.x_sens_row,
+            textvariable=self.x_sens_var,
+            font=("Arial", 12, "bold"),
+            width=6,
+            justify=tk.CENTER,
+            bg="#333333",
+            fg="#00ff00",
+            insertbackground="#00ff00",
+            relief=tk.FLAT
+        )
+        self.x_sens_entry.pack(side=tk.LEFT, padx=(0, 5))
+        self.x_sens_entry.bind('<Return>', lambda e: self.apply_custom_sensitivity())
+        self.x_sens_entry.bind('<FocusOut>', lambda e: self.apply_custom_sensitivity())
+        
+        self.x_sens_percent = tk.Label(
+            self.x_sens_row,
+            text="%",
+            font=("Arial", 11),
+            bg="#1a1a1a",
+            fg="#aaaaaa"
+        )
+        self.x_sens_percent.pack(side=tk.LEFT, padx=(0, 15))
+        
+        # X sensitivity preset buttons
         self.sens_buttons = {}
         for preset_num, preset_data in self.sensitivity_presets.items():
             btn = tk.Button(
-                self.sens_frame,
+                self.x_sens_row,
                 text=f"{preset_data['fn_sens']}",
                 command=lambda p=preset_num: self.set_sensitivity_preset(p),
-                font=("Arial", 11, "bold"),
-                bg="#00aa00" if preset_num == self.current_preset else "#444444",
+                font=("Arial", 10),
+                bg="#444444",
                 fg="white",
-                width=6,
+                width=5,
                 height=1,
                 relief=tk.FLAT
             )
-            btn.pack(side=tk.LEFT, padx=3)
+            btn.pack(side=tk.LEFT, padx=2)
             self.sens_buttons[preset_num] = btn
         
-        # Y sensitivity multiplier buttons frame
-        self.y_sens_frame = tk.Frame(self.root, bg="#1a1a1a")
+        # Y Sensitivity row
+        self.y_sens_row = tk.Frame(self.sens_frame, bg="#1a1a1a")
+        self.y_sens_row.pack(pady=3)
+        
         self.y_sens_label = tk.Label(
-            self.y_sens_frame,
+            self.y_sens_row,
             text="Y Sens:",
             font=("Arial", 11),
             bg="#1a1a1a",
@@ -358,22 +447,51 @@ class AimExercise:
         )
         self.y_sens_label.pack(side=tk.LEFT, padx=(0, 10))
         
-        # Create Y sensitivity option buttons
+        # Y sensitivity numeric entry
+        self.y_sens_var = tk.StringVar(value="7.8")
+        self.y_sens_entry = tk.Entry(
+            self.y_sens_row,
+            textvariable=self.y_sens_var,
+            font=("Arial", 12, "bold"),
+            width=6,
+            justify=tk.CENTER,
+            bg="#333333",
+            fg="#00ff00",
+            insertbackground="#00ff00",
+            relief=tk.FLAT
+        )
+        self.y_sens_entry.pack(side=tk.LEFT, padx=(0, 5))
+        self.y_sens_entry.bind('<Return>', lambda e: self.apply_custom_sensitivity())
+        self.y_sens_entry.bind('<FocusOut>', lambda e: self.apply_custom_sensitivity())
+        
+        self.y_sens_percent = tk.Label(
+            self.y_sens_row,
+            text="%",
+            font=("Arial", 11),
+            bg="#1a1a1a",
+            fg="#aaaaaa"
+        )
+        self.y_sens_percent.pack(side=tk.LEFT, padx=(0, 15))
+        
+        # Y sensitivity quick offset buttons
         self.y_sens_buttons = {}
         for option_num, option_data in self.y_sens_options.items():
             btn = tk.Button(
-                self.y_sens_frame,
+                self.y_sens_row,
                 text=option_data['label'],
-                command=lambda o=option_num: self.set_y_sensitivity(o),
-                font=("Arial", 11, "bold"),
-                bg="#00aa00" if option_num == self.current_y_option else "#444444",
+                command=lambda o=option_num: self.set_y_sensitivity_offset(o),
+                font=("Arial", 10),
+                bg="#444444",
                 fg="white",
-                width=6,
+                width=5,
                 height=1,
                 relief=tk.FLAT
             )
-            btn.pack(side=tk.LEFT, padx=3)
+            btn.pack(side=tk.LEFT, padx=2)
             self.y_sens_buttons[option_num] = btn
+        
+        # We no longer need the separate y_sens_frame
+        self.y_sens_frame = None
         
         # Crosshair style buttons frame
         self.crosshair_frame = tk.Frame(self.root, bg="#1a1a1a")
@@ -436,6 +554,9 @@ class AimExercise:
         
         # Store initial canvas height
         self.canvas_height_inactive = self.screen_height - 200
+        
+        # Apply initial sensitivity from entry field values
+        self.apply_custom_sensitivity()
     
     def set_crosshair_style(self, style_num):
         """Set the crosshair style"""
@@ -563,29 +684,46 @@ class AimExercise:
     def set_sensitivity_preset(self, preset_num):
         """Set the sensitivity to a preset value"""
         self.current_preset = preset_num
-        cm_value = self.sensitivity_presets[preset_num]['cm360']
-        self.apply_sensitivity(cm_value)
+        fn_sens = float(self.sensitivity_presets[preset_num]['fn_sens'].replace('%', ''))
         
-        # Update button colors
+        # Update entry field
+        self.x_sens_var.set(f"{fn_sens:.1f}")
+        
+        # Highlight selected preset button
         for num, btn in self.sens_buttons.items():
             if num == preset_num:
-                btn.config(bg="#00aa00")  # Highlight selected
+                btn.config(bg="#00aa00")
             else:
-                btn.config(bg="#444444")  # Default color
-    
-    def set_y_sensitivity(self, option_num):
-        """Set the Y sensitivity multiplier"""
-        self.current_y_option = option_num
-        # Re-apply sensitivity with new Y multiplier
-        cm_value = self.sensitivity_presets[self.current_preset]['cm360']
-        self.apply_sensitivity(cm_value)
+                btn.config(bg="#444444")
         
-        # Update button colors
+        # Apply sensitivity
+        self.apply_custom_sensitivity()
+    
+    def set_y_sensitivity_offset(self, option_num):
+        """Set the Y sensitivity using offset from current X"""
+        try:
+            x_val = float(self.x_sens_var.get())
+        except ValueError:
+            x_val = 5.3
+        
+        y_option = self.y_sens_options[option_num]
+        if y_option['offset'] is None:
+            y_val = x_val  # Same as X
+        else:
+            y_val = x_val + y_option['offset']
+        
+        # Update Y entry field
+        self.y_sens_var.set(f"{y_val:.1f}")
+        
+        # Highlight selected offset button
         for num, btn in self.y_sens_buttons.items():
             if num == option_num:
-                btn.config(bg="#00aa00")  # Highlight selected
+                btn.config(bg="#00aa00")
             else:
-                btn.config(bg="#444444")  # Default color
+                btn.config(bg="#444444")
+        
+        # Apply sensitivity
+        self.apply_custom_sensitivity()
         
     def select_mode(self, mode):
         """Select game mode"""
@@ -605,9 +743,8 @@ class AimExercise:
         # Show control buttons
         self.button_frame.pack(pady=10)
         
-        # Show sensitivity frames
+        # Show sensitivity frame (contains both X and Y)
         self.sens_frame.pack(pady=5)
-        self.y_sens_frame.pack(pady=5)
         
         # Show crosshair frame
         self.crosshair_frame.pack(pady=5)
@@ -623,7 +760,6 @@ class AimExercise:
         self.game_mode = None
         self.button_frame.pack_forget()
         self.sens_frame.pack_forget()
-        self.y_sens_frame.pack_forget()
         self.crosshair_frame.pack_forget()
         self.canvas.pack_forget()
         self.title.config(text="FPS Aim Trainer - Select Your Mode", font=("Arial", 24, "bold"))
@@ -634,6 +770,9 @@ class AimExercise:
         """Start the aim exercise"""
         if self.game_mode is None:
             return
+        
+        # Apply current sensitivity from entry fields before starting
+        self.apply_custom_sensitivity()
             
         self.is_active = True
         self.mouse_locked = True
@@ -644,7 +783,6 @@ class AimExercise:
         self.title.pack_forget()
         self.button_frame.pack_forget()
         self.sens_frame.pack_forget()
-        self.y_sens_frame.pack_forget()
         self.crosshair_frame.pack_forget()
         self.stats_label.pack_forget()
         
@@ -663,9 +801,21 @@ class AimExercise:
         self.targets = []
         self.trail_points = []
         self.path_efficiencies = []  # Reset path tracking
+        self.x_efficiencies = []  # Reset X efficiency tracking
+        self.y_efficiencies = []  # Reset Y efficiency tracking
         self.path_points = []
         self.has_last_hit = False
         self.hit_precisions = []  # Reset hit precision tracking
+        
+        # Reset approach analysis tracking
+        self.x_overshoots = []
+        self.y_overshoots = []
+        self.x_micro_adjustments = []
+        self.y_micro_adjustments = []
+        
+        # Reset session timer
+        self.session_timer = 0.0
+        self.last_timer_update = time.time()
         
         # Store last mouse position for delta calculation
         pos = self.mouse.position
@@ -698,7 +848,6 @@ class AimExercise:
         self.title.pack(pady=10)
         self.button_frame.pack(pady=10)
         self.sens_frame.pack(pady=5)
-        self.y_sens_frame.pack(pady=5)
         self.crosshair_frame.pack(pady=5)
         self.stats_label.pack(pady=5)
         
@@ -715,13 +864,27 @@ class AimExercise:
         """Reset statistics"""
         self.stats.reset()
         self.path_efficiencies = []
+        self.x_efficiencies = []
+        self.y_efficiencies = []
         self.hit_precisions = []
         self.has_last_hit = False
+        self.x_overshoots = []
+        self.y_overshoots = []
+        self.x_micro_adjustments = []
+        self.y_micro_adjustments = []
         self.update_stats_display()
         
     def lock_mouse_loop(self):
         """Continuously recenter mouse and update view"""
         if self.is_active:
+            current_time = time.time()
+            
+            # Update session timer only when active and mouse is locked (window focused)
+            if self.mouse_locked:
+                delta = current_time - self.last_timer_update
+                self.session_timer += delta
+            self.last_timer_update = current_time
+            
             if self.mouse_locked:
                 # Get current mouse position
                 pos = self.mouse.position
@@ -818,6 +981,201 @@ class AimExercise:
             return min(efficiency, 100.0)  # Cap at 100%
         return None
     
+    def calculate_axis_efficiency(self, target_yaw, target_pitch):
+        """Calculate X and Y axis efficiency separately"""
+        if len(self.path_points) < 2 or not self.has_last_hit:
+            return None, None  # Not enough data
+        
+        # Calculate direct X (yaw) distance from last hit to target
+        direct_x = target_yaw - self.last_hit_yaw
+        # Handle yaw wraparound
+        while direct_x > 180:
+            direct_x -= 360
+        while direct_x < -180:
+            direct_x += 360
+        direct_x = abs(direct_x)
+        
+        # Calculate direct Y (pitch) distance
+        direct_y = abs(target_pitch - self.last_hit_pitch)
+        
+        # Skip if movement was too small on either axis
+        min_movement = 0.5  # Minimum degrees to consider
+        
+        # Calculate actual X and Y distances traveled
+        actual_x = 0.0
+        actual_y = 0.0
+        
+        for i in range(1, len(self.path_points)):
+            yaw1, pitch1 = self.path_points[i - 1]
+            yaw2, pitch2 = self.path_points[i]
+            
+            # Handle yaw wraparound for X movement
+            seg_x = yaw2 - yaw1
+            while seg_x > 180:
+                seg_x -= 360
+            while seg_x < -180:
+                seg_x += 360
+            actual_x += abs(seg_x)
+            
+            # Y movement (no wraparound needed)
+            actual_y += abs(pitch2 - pitch1)
+        
+        # Calculate X efficiency
+        x_efficiency = None
+        if direct_x >= min_movement and actual_x > 0:
+            x_efficiency = (direct_x / actual_x) * 100
+            x_efficiency = min(x_efficiency, 100.0)  # Cap at 100%
+        
+        # Calculate Y efficiency
+        y_efficiency = None
+        if direct_y >= min_movement and actual_y > 0:
+            y_efficiency = (direct_y / actual_y) * 100
+            y_efficiency = min(y_efficiency, 100.0)  # Cap at 100%
+        
+        return x_efficiency, y_efficiency
+    
+    def analyze_final_approach(self, target_yaw, target_pitch):
+        """
+        Analyze the final approach to the target to detect overshoot/undershoot patterns.
+        
+        Returns dict with:
+        - x_reversals: Number of X direction changes near target (overshoot indicator)
+        - y_reversals: Number of Y direction changes near target (overshoot indicator)
+        - x_micro_adjustments: Number of distinct movement pulses on X (undershoot indicator)
+        - y_micro_adjustments: Number of distinct movement pulses on Y (undershoot indicator)
+        - x_max_overshoot: Maximum distance past target on X axis
+        - y_max_overshoot: Maximum distance past target on Y axis
+        """
+        if len(self.path_points) < 5 or not self.has_last_hit:
+            return None
+        
+        # Analyze the final portion of the path (last 30%)
+        analysis_start = int(len(self.path_points) * (1 - self.approach_analysis_window))
+        final_path = self.path_points[analysis_start:]
+        
+        if len(final_path) < 3:
+            return None
+        
+        # Initialize counters
+        x_reversals = 0
+        y_reversals = 0
+        x_max_overshoot = 0.0
+        y_max_overshoot = 0.0
+        
+        # Movement pulse detection
+        # A "pulse" is a period of movement after a pause
+        # More pulses = more stop-and-go = undershooting
+        pause_threshold = 0.05  # Degrees - below this is considered "stopped"
+        move_threshold = 0.15   # Degrees - above this is considered "moving"
+        
+        x_is_moving = False
+        y_is_moving = False
+        x_pulses = 0
+        y_pulses = 0
+        
+        last_x_dir = 0
+        last_y_dir = 0
+        
+        # Calculate target direction from start of analysis window
+        start_yaw, start_pitch = final_path[0]
+        
+        # Handle yaw wraparound for target direction
+        target_x_diff = target_yaw - start_yaw
+        while target_x_diff > 180:
+            target_x_diff -= 360
+        while target_x_diff < -180:
+            target_x_diff += 360
+        target_x_dir = 1 if target_x_diff > 0 else -1
+        
+        target_y_diff = target_pitch - start_pitch
+        target_y_dir = 1 if target_y_diff > 0 else -1
+        
+        for i in range(1, len(final_path)):
+            prev_yaw, prev_pitch = final_path[i - 1]
+            curr_yaw, curr_pitch = final_path[i]
+            
+            # Calculate movement deltas
+            dx = curr_yaw - prev_yaw
+            # Handle yaw wraparound
+            while dx > 180:
+                dx -= 360
+            while dx < -180:
+                dx += 360
+            dy = curr_pitch - prev_pitch
+            
+            abs_dx = abs(dx)
+            abs_dy = abs(dy)
+            
+            # Determine movement direction
+            curr_x_dir = 1 if dx > 0.01 else (-1 if dx < -0.01 else 0)
+            curr_y_dir = 1 if dy > 0.01 else (-1 if dy < -0.01 else 0)
+            
+            # Detect X reversals (direction change)
+            if curr_x_dir != 0 and last_x_dir != 0 and curr_x_dir != last_x_dir:
+                x_reversals += 1
+            
+            # Detect Y reversals
+            if curr_y_dir != 0 and last_y_dir != 0 and curr_y_dir != last_y_dir:
+                y_reversals += 1
+            
+            # Detect X movement pulses (stop-and-go pattern)
+            if abs_dx < pause_threshold:
+                # We've stopped on X axis
+                x_is_moving = False
+            elif abs_dx > move_threshold:
+                # We're moving on X axis
+                if not x_is_moving:
+                    # Just started a new movement pulse
+                    x_pulses += 1
+                x_is_moving = True
+            
+            # Detect Y movement pulses
+            if abs_dy < pause_threshold:
+                y_is_moving = False
+            elif abs_dy > move_threshold:
+                if not y_is_moving:
+                    y_pulses += 1
+                y_is_moving = True
+            
+            # Check for overshoot (crossed past target)
+            curr_x_diff = target_yaw - curr_yaw
+            while curr_x_diff > 180:
+                curr_x_diff -= 360
+            while curr_x_diff < -180:
+                curr_x_diff += 360
+            
+            # If we're now on the opposite side of target from where we started
+            curr_x_side = 1 if curr_x_diff > 0 else -1
+            if curr_x_side != target_x_dir:
+                overshoot_dist = abs(curr_x_diff)
+                x_max_overshoot = max(x_max_overshoot, overshoot_dist)
+            
+            curr_y_diff = target_pitch - curr_pitch
+            curr_y_side = 1 if curr_y_diff > 0 else -1
+            if curr_y_side != target_y_dir:
+                overshoot_dist = abs(curr_y_diff)
+                y_max_overshoot = max(y_max_overshoot, overshoot_dist)
+            
+            # Update last direction
+            if curr_x_dir != 0:
+                last_x_dir = curr_x_dir
+            if curr_y_dir != 0:
+                last_y_dir = curr_y_dir
+        
+        # Subtract 1 from pulses (the initial movement toward target is expected)
+        # More than 1 pulse = had to restart movement = undershooting
+        x_micro_adjustments = max(0, x_pulses - 1)
+        y_micro_adjustments = max(0, y_pulses - 1)
+        
+        return {
+            'x_reversals': x_reversals,
+            'y_reversals': y_reversals,
+            'x_micro_adjustments': x_micro_adjustments,
+            'y_micro_adjustments': y_micro_adjustments,
+            'x_max_overshoot': x_max_overshoot,
+            'y_max_overshoot': y_max_overshoot
+        }
+    
     def record_hit_position(self):
         """Record the current position as a hit location"""
         self.last_hit_yaw = self.yaw
@@ -831,11 +1189,72 @@ class AimExercise:
             return 0.0
         return sum(self.path_efficiencies) / len(self.path_efficiencies)
     
+    def get_average_x_efficiency(self):
+        """Get average X-axis efficiency"""
+        if not self.x_efficiencies:
+            return 0.0
+        return sum(self.x_efficiencies) / len(self.x_efficiencies)
+    
+    def get_average_y_efficiency(self):
+        """Get average Y-axis efficiency"""
+        if not self.y_efficiencies:
+            return 0.0
+        return sum(self.y_efficiencies) / len(self.y_efficiencies)
+    
     def get_average_hit_precision(self):
         """Get average hit precision (100% = center of target)"""
         if not self.hit_precisions:
             return 0.0
         return sum(self.hit_precisions) / len(self.hit_precisions)
+    
+    def get_average_overshoots(self):
+        """Get average overshoot counts for X and Y"""
+        x_avg = sum(self.x_overshoots) / len(self.x_overshoots) if self.x_overshoots else 0.0
+        y_avg = sum(self.y_overshoots) / len(self.y_overshoots) if self.y_overshoots else 0.0
+        return x_avg, y_avg
+    
+    def get_average_micro_adjustments(self):
+        """Get average micro-adjustment counts for X and Y"""
+        x_avg = sum(self.x_micro_adjustments) / len(self.x_micro_adjustments) if self.x_micro_adjustments else 0.0
+        y_avg = sum(self.y_micro_adjustments) / len(self.y_micro_adjustments) if self.y_micro_adjustments else 0.0
+        return x_avg, y_avg
+    
+    def get_sensitivity_diagnosis(self):
+        """
+        Analyze overshoot/nudge patterns to suggest sensitivity adjustments.
+        Returns a diagnosis string for display.
+        """
+        x_over, y_over = self.get_average_overshoots()
+        x_nudges, y_nudges = self.get_average_micro_adjustments()
+        
+        diagnoses = []
+        
+        # Thresholds for diagnosis
+        # Reversals: direction changes near target (overshoot indicator)
+        overshoot_threshold = 0.5  # 0.5+ reversals per target = overshooting
+        
+        # Nudges: extra movement pulses (undershoot indicator)
+        # 0 = one smooth motion (ideal)
+        # 1+ = had to restart movement (undershooting)
+        nudge_threshold = 0.8  # 0.8+ extra pulses per target = undershooting
+        
+        # X-axis diagnosis
+        if x_over > overshoot_threshold and x_nudges <= nudge_threshold:
+            diagnoses.append("X: overshoot (↓ sens)")
+        elif x_nudges > nudge_threshold and x_over <= overshoot_threshold:
+            diagnoses.append("X: undershoot (↑ sens)")
+        elif x_over > overshoot_threshold and x_nudges > nudge_threshold:
+            diagnoses.append("X: inconsistent")
+        
+        # Y-axis diagnosis
+        if y_over > overshoot_threshold and y_nudges <= nudge_threshold:
+            diagnoses.append("Y: overshoot (↓ sens)")
+        elif y_nudges > nudge_threshold and y_over <= overshoot_threshold:
+            diagnoses.append("Y: undershoot (↑ sens)")
+        elif y_over > overshoot_threshold and y_nudges > nudge_threshold:
+            diagnoses.append("Y: inconsistent")
+        
+        return " | ".join(diagnoses) if diagnoses else ""
     
     def spawn_tracking_target(self):
         """Spawn a moving target for tracking mode"""
@@ -1033,41 +1452,72 @@ class AimExercise:
             accuracy = self.stats.get_accuracy()
             avg_time = self.stats.get_average_reaction_time()
             
+            # Draw timer in top right corner
+            timer_minutes = int(self.session_timer // 60)
+            timer_seconds = int(self.session_timer % 60)
+            timer_text = f"{timer_minutes:02d}:{timer_seconds:02d}"
+            self.canvas.create_text(
+                self.canvas_width - 60,
+                30,
+                text=timer_text,
+                font=("Arial", 20, "bold"),
+                fill="#ffffff",
+                tags="timer"
+            )
+            
             if self.game_mode == 'random':
+                # First line: basic stats
                 stats_text = f"Hits: {self.stats.hits} | Misses: {self.stats.misses} | Accuracy: {accuracy:.1f}%"
-                avg_efficiency = self.get_average_path_efficiency()
-                if avg_efficiency > 0:
-                    stats_text += f" | Path: {avg_efficiency:.1f}%"
+                if avg_time > 0:
+                    stats_text += f" | Avg Time: {avg_time:.3f}s"
                 avg_precision = self.get_average_hit_precision()
                 if avg_precision > 0:
                     stats_text += f" | Precision: {avg_precision:.1f}%"
+                
+                # Second line: path efficiency breakdown
+                avg_efficiency = self.get_average_path_efficiency()
+                avg_x_eff = self.get_average_x_efficiency()
+                avg_y_eff = self.get_average_y_efficiency()
+                
+                efficiency_text = ""
+                if avg_efficiency > 0:
+                    efficiency_text = f"Path: {avg_efficiency:.1f}%"
+                if avg_x_eff > 0:
+                    efficiency_text += f" | X: {avg_x_eff:.1f}%"
+                if avg_y_eff > 0:
+                    efficiency_text += f" | Y: {avg_y_eff:.1f}%"
+                
+                # Third line: approach analysis (overshoot/undershoot detection)
+                approach_text = ""
+                x_over, y_over = self.get_average_overshoots()
+                x_micro, y_micro = self.get_average_micro_adjustments()
+                
+                if x_over > 0 or y_over > 0 or x_micro > 0 or y_micro > 0:
+                    approach_text = f"Reversals - X: {x_over:.1f} Y: {y_over:.1f} | Nudges - X: {x_micro:.1f} Y: {y_micro:.1f}"
+                    
+                    # Add sensitivity diagnosis
+                    diagnosis = self.get_sensitivity_diagnosis()
+                    if diagnosis:
+                        approach_text += f" | {diagnosis}"
+                
             elif self.game_mode == 'tracking':
                 elapsed = time.time() - self.tracking_start_time
                 remaining = max(0, self.tracking_duration - elapsed)
                 tracking_accuracy = 0
                 if self.tracking_total_time > 0:
                     tracking_accuracy = (self.tracking_time_on_target / self.tracking_total_time) * 100
-                targets_destroyed = len([t for t in self.tracking_targets if t['health'] <= 0])
                 stats_text = f"Time: {remaining:.1f}s | Tracking Accuracy: {tracking_accuracy:.1f}% | On Target: {self.tracking_time_on_target:.1f}s"
-            
-            if avg_time > 0:
-                stats_text += f" | Avg Time: {avg_time:.3f}s"
+                efficiency_text = ""
+                approach_text = ""
             
             # Show current sensitivity (X and Y)
-            current_fn_sens = self.sensitivity_presets[self.current_preset]['fn_sens']
-            x_fn_val = float(current_fn_sens.replace('%', ''))
-            y_option = self.y_sens_options[self.current_y_option]
-            if y_option['offset'] is None:
-                y_display = "Same"
-            else:
-                y_fn_val = x_fn_val + y_option['offset']
-                y_display = f"{y_fn_val:.1f}%"
-            stats_text += f" | X: {current_fn_sens} Y: {y_display}"
+            stats_text += f" | X: {self.current_x_sens:.1f}% Y: {self.current_y_sens:.1f}%"
             
             # Add message if mouse is unlocked
             if not self.mouse_locked and self.mouse_was_locked:
                 stats_text += " | CLICK TO REACTIVATE MOUSE LOCK"
             
+            # Draw first line of stats
             self.canvas.create_text(
                 center_x,
                 30,
@@ -1076,6 +1526,28 @@ class AimExercise:
                 fill="#00ff00",
                 tags="stats"
             )
+            
+            # Draw second line (efficiency breakdown) if we have data
+            if self.game_mode == 'random' and efficiency_text:
+                self.canvas.create_text(
+                    center_x,
+                    55,
+                    text=efficiency_text,
+                    font=("Arial", 14),
+                    fill="#ffaa00",  # Orange for efficiency stats
+                    tags="stats"
+                )
+            
+            # Draw third line (approach analysis) if we have data
+            if self.game_mode == 'random' and approach_text:
+                self.canvas.create_text(
+                    center_x,
+                    80,
+                    text=approach_text,
+                    font=("Arial", 13),
+                    fill="#ff6666",  # Light red for approach analysis
+                    tags="stats"
+                )
         
         # Remove old trail points (older than fade time)
         self.trail_points = [
@@ -1357,6 +1829,21 @@ class AimExercise:
                 efficiency = self.calculate_path_efficiency(target_yaw, target_pitch)
                 if efficiency is not None:
                     self.path_efficiencies.append(efficiency)
+                
+                # Calculate axis-specific efficiency
+                x_eff, y_eff = self.calculate_axis_efficiency(target_yaw, target_pitch)
+                if x_eff is not None:
+                    self.x_efficiencies.append(x_eff)
+                if y_eff is not None:
+                    self.y_efficiencies.append(y_eff)
+                
+                # Analyze final approach for overshoot/undershoot patterns
+                approach_data = self.analyze_final_approach(target_yaw, target_pitch)
+                if approach_data:
+                    self.x_overshoots.append(approach_data['x_reversals'])
+                    self.y_overshoots.append(approach_data['y_reversals'])
+                    self.x_micro_adjustments.append(approach_data['x_micro_adjustments'])
+                    self.y_micro_adjustments.append(approach_data['y_micro_adjustments'])
             
             # Record this hit position for next path measurement
             self.record_hit_position()
@@ -1388,6 +1875,18 @@ class AimExercise:
         stats_text = f"Hits: {self.stats.hits} | Misses: {self.stats.misses} | Accuracy: {accuracy:.1f}%"
         if avg_time > 0:
             stats_text += f" | Avg Time: {avg_time:.3f}s"
+        
+        # Add efficiency breakdown
+        avg_efficiency = self.get_average_path_efficiency()
+        avg_x_eff = self.get_average_x_efficiency()
+        avg_y_eff = self.get_average_y_efficiency()
+        
+        if avg_efficiency > 0:
+            stats_text += f" | Path: {avg_efficiency:.1f}%"
+        if avg_x_eff > 0:
+            stats_text += f" | X: {avg_x_eff:.1f}%"
+        if avg_y_eff > 0:
+            stats_text += f" | Y: {avg_y_eff:.1f}%"
         
         # Only update label when not in active gameplay (stats drawn in draw_scene when active)
         if not self.is_active:
