@@ -63,7 +63,7 @@ class AimExercise:
         
         # Current sensitivity values (will be set properly after UI creation)
         self.current_x_sens = 5.3
-        self.current_y_sens = 7.8  # Default: X + 2.5
+        self.current_y_sens = 7.6  # Default Y sensitivity
         
         # Virtual camera yaw/pitch (in degrees)
         self.yaw = 0.0
@@ -96,6 +96,11 @@ class AimExercise:
         self.trail_fade_time = 0.5  # Seconds before trail fades completely
         self.last_trail_time = 0  # Track when we last added a trail point
         
+        # Trail flash effect for overshoot/undershoot feedback
+        self.trail_flash_time = 0  # When flash started
+        self.trail_flash_type = None  # 'over', 'under', 'both', or None
+        self.trail_flash_duration = 0.3  # How long flash lasts (seconds)
+        
         # Path efficiency tracking
         self.last_hit_yaw = 0.0  # Position where last target was hit
         self.last_hit_pitch = 0.0
@@ -111,6 +116,25 @@ class AimExercise:
         self.x_micro_adjustments = []  # List of X micro-adjustment counts
         self.y_micro_adjustments = []  # List of Y micro-adjustment counts
         self.approach_analysis_window = 0.3  # Analyze last 30% of path
+        
+        # Last shot analysis (for debug display)
+        self.last_shot_type = ""  # "HIT" or "MISS"
+        self.last_shot_analysis = None  # Last approach analysis result
+        
+        # Debug mode variables
+        self.debug_frozen = False
+        self.debug_freeze_time = 0
+        self.debug_analysis_points = []
+        self.debug_reversal_points = []
+        self.debug_pause_points = []
+        self.debug_x_undershoot_points = []  # X axis undershoots
+        self.debug_y_undershoot_points = []  # Y axis undershoots
+        self.debug_x_overshoot_pos = None  # Position of max X overshoot
+        self.debug_y_overshoot_pos = None  # Position of max Y overshoot
+        
+        # Last shot analysis for detailed display
+        self.last_shot_analysis = None  # Stores the most recent shot's approach data
+        self.last_shot_was_hit = False  # Whether last shot was a hit or miss
         
         # Crosshair styles
         self.crosshair_styles = {
@@ -319,6 +343,20 @@ class AimExercise:
         )
         self.tracking_mode_btn.pack(side=tk.LEFT, padx=15)
         
+        # Debug test mode button
+        self.debug_mode_btn = tk.Button(
+            self.mode_frame,
+            text="DEBUG TEST\n\nSingle target, visual path\nTest approach metrics",
+            command=lambda: self.select_mode('debug'),
+            font=("Arial", 14, "bold"),
+            bg="#aa5500",
+            fg="white",
+            width=25,
+            height=5,
+            relief=tk.FLAT
+        )
+        self.debug_mode_btn.pack(side=tk.LEFT, padx=15)
+        
         # Control buttons (initially hidden)
         self.button_frame = tk.Frame(self.root, bg="#1a1a1a")
         
@@ -448,7 +486,7 @@ class AimExercise:
         self.y_sens_label.pack(side=tk.LEFT, padx=(0, 10))
         
         # Y sensitivity numeric entry
-        self.y_sens_var = tk.StringVar(value="7.8")
+        self.y_sens_var = tk.StringVar(value="7.6")
         self.y_sens_entry = tk.Entry(
             self.y_sens_row,
             textvariable=self.y_sens_var,
@@ -739,6 +777,9 @@ class AimExercise:
         elif mode == 'tracking':
             self.title.config(text="Tracking Practice Mode", font=("Arial", 20, "bold"))
             self.stats_label.config(text="Keep crosshair on targets | 60 seconds | M for menu | ESC to exit")
+        elif mode == 'debug':
+            self.title.config(text="Debug Test Mode", font=("Arial", 20, "bold"))
+            self.stats_label.config(text="Single target | Path visualization | SPACE to spawn new target | M for menu")
         
         # Show control buttons
         self.button_frame.pack(pady=10)
@@ -812,6 +853,11 @@ class AimExercise:
         self.y_overshoots = []
         self.x_micro_adjustments = []
         self.y_micro_adjustments = []
+        self.last_shot_analysis = None
+        self.last_shot_was_hit = False
+        self.last_shot_type = ""
+        self.trail_flash_type = None
+        self.trail_flash_time = 0
         
         # Reset session timer
         self.session_timer = 0.0
@@ -833,6 +879,18 @@ class AimExercise:
             self.tracking_targets = []
             self.spawn_tracking_target()
             self.spawn_tracking_target()  # Start with 2 targets
+        elif self.game_mode == 'debug':
+            # Debug mode: single target, no expiration
+            self.debug_frozen = False  # Whether we're frozen showing results
+            self.debug_freeze_time = 0
+            self.debug_analysis_points = []  # Points in the analysis window
+            self.debug_reversal_points = []  # Where reversals were detected
+            self.debug_pause_points = []  # Where pauses were detected
+            self.debug_x_undershoot_points = []  # X axis undershoots
+            self.debug_y_undershoot_points = []  # Y axis undershoots
+            self.spawn_debug_target()
+            # Bind space to spawn new target
+            self.root.bind("<space>", lambda e: self.spawn_debug_target() if (self.is_active and self.game_mode == 'debug') else None)
         
         self.lock_mouse_loop()
         
@@ -910,8 +968,8 @@ class AimExercise:
                     self.trail_points.append((self.yaw, self.pitch, current_time))
                     self.last_trail_time = current_time
                     
-                    # Track path for efficiency calculation (always recording in random mode)
-                    if self.game_mode == 'random' and self.has_last_hit:
+                    # Track path for efficiency calculation (random and debug modes)
+                    if (self.game_mode == 'random' or self.game_mode == 'debug') and self.has_last_hit:
                         self.path_points.append((self.yaw, self.pitch))
                 
                 # Recenter mouse to lock position only if window has focus
@@ -1034,7 +1092,7 @@ class AimExercise:
         
         return x_efficiency, y_efficiency
     
-    def analyze_final_approach(self, target_yaw, target_pitch):
+    def analyze_final_approach(self, target_yaw, target_pitch, capture_debug=False):
         """
         Analyze the final approach to the target to detect overshoot/undershoot patterns.
         
@@ -1045,22 +1103,36 @@ class AimExercise:
         - y_micro_adjustments: Number of distinct movement pulses on Y (undershoot indicator)
         - x_max_overshoot: Maximum distance past target on X axis
         - y_max_overshoot: Maximum distance past target on Y axis
+        
+        If capture_debug=True, also populates self.debug_*_points lists for visualization.
         """
         if len(self.path_points) < 5 or not self.has_last_hit:
             return None
         
-        # Analyze the final portion of the path (last 30%)
+        # Analyze the final portion of the path (last 30%) for reversals/pulses
         analysis_start = int(len(self.path_points) * (1 - self.approach_analysis_window))
         final_path = self.path_points[analysis_start:]
         
         if len(final_path) < 3:
             return None
         
+        # Clear and capture debug points if requested
+        if capture_debug:
+            self.debug_analysis_points = final_path.copy()
+            self.debug_reversal_points = []
+            self.debug_pause_points = []
+            self.debug_x_undershoot_points = []
+            self.debug_y_undershoot_points = []
+            self.debug_x_overshoot_pos = None
+            self.debug_y_overshoot_pos = None
+        
         # Initialize counters
         x_reversals = 0
         y_reversals = 0
         x_max_overshoot = 0.0
         y_max_overshoot = 0.0
+        x_max_overshoot_pos = None
+        y_max_overshoot_pos = None
         
         # Movement pulse detection
         # A "pulse" is a period of movement after a pause
@@ -1072,23 +1144,69 @@ class AimExercise:
         y_is_moving = False
         x_pulses = 0
         y_pulses = 0
+        x_was_paused = False  # Track if we've seen a pause
+        y_was_paused = False
         
         last_x_dir = 0
         last_y_dir = 0
         
-        # Calculate target direction from start of analysis window
-        start_yaw, start_pitch = final_path[0]
+        # Calculate target direction from START of entire path (not analysis window)
+        # This is critical for overshoot detection
+        path_start_yaw, path_start_pitch = self.path_points[0]
         
         # Handle yaw wraparound for target direction
-        target_x_diff = target_yaw - start_yaw
+        target_x_diff = target_yaw - path_start_yaw
         while target_x_diff > 180:
             target_x_diff -= 360
         while target_x_diff < -180:
             target_x_diff += 360
         target_x_dir = 1 if target_x_diff > 0 else -1
         
-        target_y_diff = target_pitch - start_pitch
+        target_y_diff = target_pitch - path_start_pitch
         target_y_dir = 1 if target_y_diff > 0 else -1
+        
+        # Calculate target angular radius (half-size in degrees)
+        # This is the distance from center to edge
+        target_angular_radius = self.target_size / self.pixels_per_degree
+        
+        # Calculate target edges based on approach direction
+        # If approaching from left (target_x_dir > 0), the far edge is target_yaw + radius
+        # If approaching from right (target_x_dir < 0), the far edge is target_yaw - radius
+        target_x_far_edge = target_yaw + (target_x_dir * target_angular_radius)
+        target_y_far_edge = target_pitch + (target_y_dir * target_angular_radius)
+        
+        # First pass: scan ENTIRE path for max overshoot past target EDGE (track X and Y separately)
+        for i in range(1, len(self.path_points)):
+            curr_yaw, curr_pitch = self.path_points[i]
+            
+            # Check for X overshoot (crossed past target's far horizontal edge)
+            curr_x_diff = target_x_far_edge - curr_yaw
+            while curr_x_diff > 180:
+                curr_x_diff -= 360
+            while curr_x_diff < -180:
+                curr_x_diff += 360
+            
+            # Overshoot if we're on the opposite side of the FAR EDGE from where we started
+            curr_x_side = 1 if curr_x_diff > 0 else -1
+            if curr_x_side != target_x_dir:
+                # We crossed past the far edge - this is overshoot
+                overshoot_dist = abs(curr_x_diff)
+                if overshoot_dist > x_max_overshoot:
+                    x_max_overshoot = overshoot_dist
+                    x_max_overshoot_pos = (curr_yaw, curr_pitch)
+            
+            # Check for Y overshoot (crossed past target's far vertical edge)
+            curr_y_diff = target_y_far_edge - curr_pitch
+            curr_y_side = 1 if curr_y_diff > 0 else -1
+            if curr_y_side != target_y_dir:
+                # We crossed past the far edge - this is overshoot
+                overshoot_dist = abs(curr_y_diff)
+                if overshoot_dist > y_max_overshoot:
+                    y_max_overshoot = overshoot_dist
+                    y_max_overshoot_pos = (curr_yaw, curr_pitch)
+        
+        # Use start of analysis window for reversal/pulse direction
+        start_yaw, start_pitch = final_path[0]
         
         for i in range(1, len(final_path)):
             prev_yaw, prev_pitch = final_path[i - 1]
@@ -1106,55 +1224,69 @@ class AimExercise:
             abs_dx = abs(dx)
             abs_dy = abs(dy)
             
+            # Check if cursor has reached the target's NEAR edge yet
+            # Near edge is the edge closest to where we started
+            curr_x_diff_to_near = (target_yaw - target_x_dir * target_angular_radius) - curr_yaw
+            while curr_x_diff_to_near > 180:
+                curr_x_diff_to_near -= 360
+            while curr_x_diff_to_near < -180:
+                curr_x_diff_to_near += 360
+            curr_x_side_of_near = 1 if curr_x_diff_to_near > 0 else -1
+            x_reached_target = (curr_x_side_of_near != target_x_dir)  # Passed the near edge
+            
+            curr_y_diff_to_near = (target_pitch - target_y_dir * target_angular_radius) - curr_pitch
+            curr_y_side_of_near = 1 if curr_y_diff_to_near > 0 else -1
+            y_reached_target = (curr_y_side_of_near != target_y_dir)  # Passed the near edge
+            
             # Determine movement direction
             curr_x_dir = 1 if dx > 0.01 else (-1 if dx < -0.01 else 0)
             curr_y_dir = 1 if dy > 0.01 else (-1 if dy < -0.01 else 0)
             
             # Detect X reversals (direction change)
+            # Record the PREVIOUS point as that's where the reversal tip was
             if curr_x_dir != 0 and last_x_dir != 0 and curr_x_dir != last_x_dir:
                 x_reversals += 1
+                if capture_debug:
+                    self.debug_reversal_points.append((prev_yaw, prev_pitch))
             
             # Detect Y reversals
             if curr_y_dir != 0 and last_y_dir != 0 and curr_y_dir != last_y_dir:
                 y_reversals += 1
+                if capture_debug:
+                    self.debug_reversal_points.append((prev_yaw, prev_pitch))
             
-            # Detect X movement pulses (stop-and-go pattern)
+            # Detect X movement pulses (stop-and-go pattern) - ONLY before reaching target
             if abs_dx < pause_threshold:
                 # We've stopped on X axis
+                if x_is_moving and capture_debug and not x_reached_target:
+                    self.debug_pause_points.append((curr_yaw, curr_pitch))
                 x_is_moving = False
+                if not x_reached_target:
+                    x_was_paused = True
             elif abs_dx > move_threshold:
                 # We're moving on X axis
                 if not x_is_moving:
-                    # Just started a new movement pulse
-                    x_pulses += 1
+                    # Just started a new movement pulse - only count if before reaching target
+                    if not x_reached_target:
+                        x_pulses += 1
+                        if capture_debug and x_was_paused:
+                            self.debug_x_undershoot_points.append((curr_yaw, curr_pitch))
                 x_is_moving = True
             
-            # Detect Y movement pulses
+            # Detect Y movement pulses - ONLY before reaching target
             if abs_dy < pause_threshold:
+                if y_is_moving and capture_debug and not y_reached_target:
+                    self.debug_pause_points.append((curr_yaw, curr_pitch))
                 y_is_moving = False
+                if not y_reached_target:
+                    y_was_paused = True
             elif abs_dy > move_threshold:
                 if not y_is_moving:
-                    y_pulses += 1
+                    if not y_reached_target:
+                        y_pulses += 1
+                        if capture_debug and y_was_paused:
+                            self.debug_y_undershoot_points.append((curr_yaw, curr_pitch))
                 y_is_moving = True
-            
-            # Check for overshoot (crossed past target)
-            curr_x_diff = target_yaw - curr_yaw
-            while curr_x_diff > 180:
-                curr_x_diff -= 360
-            while curr_x_diff < -180:
-                curr_x_diff += 360
-            
-            # If we're now on the opposite side of target from where we started
-            curr_x_side = 1 if curr_x_diff > 0 else -1
-            if curr_x_side != target_x_dir:
-                overshoot_dist = abs(curr_x_diff)
-                x_max_overshoot = max(x_max_overshoot, overshoot_dist)
-            
-            curr_y_diff = target_pitch - curr_pitch
-            curr_y_side = 1 if curr_y_diff > 0 else -1
-            if curr_y_side != target_y_dir:
-                overshoot_dist = abs(curr_y_diff)
-                y_max_overshoot = max(y_max_overshoot, overshoot_dist)
             
             # Update last direction
             if curr_x_dir != 0:
@@ -1166,6 +1298,11 @@ class AimExercise:
         # More than 1 pulse = had to restart movement = undershooting
         x_micro_adjustments = max(0, x_pulses - 1)
         y_micro_adjustments = max(0, y_pulses - 1)
+        
+        # Capture max overshoot positions for debug visualization (store separately)
+        if capture_debug:
+            self.debug_x_overshoot_pos = x_max_overshoot_pos
+            self.debug_y_overshoot_pos = y_max_overshoot_pos
         
         return {
             'x_reversals': x_reversals,
@@ -1255,6 +1392,65 @@ class AimExercise:
             diagnoses.append("Y: inconsistent")
         
         return " | ".join(diagnoses) if diagnoses else ""
+    
+    def classify_shot(self, approach_data):
+        """
+        Classify a single shot as overshoot/undershoot/good based on approach data.
+        Returns a dict with X and Y classifications.
+        """
+        if not approach_data:
+            return {'x': 'none', 'y': 'none'}
+        
+        # Thresholds (same as diagnosis)
+        overshoot_threshold = 0.5
+        nudge_threshold = 0.8
+        
+        result = {'x': 'good', 'y': 'good'}
+        
+        # X-axis
+        x_rev = approach_data['x_reversals']
+        x_nudge = approach_data['x_micro_adjustments']
+        if x_rev > overshoot_threshold and x_nudge <= nudge_threshold:
+            result['x'] = 'OVER'
+        elif x_nudge > nudge_threshold and x_rev <= overshoot_threshold:
+            result['x'] = 'UNDER'
+        elif x_rev > overshoot_threshold and x_nudge > nudge_threshold:
+            result['x'] = 'BOTH'
+        
+        # Y-axis
+        y_rev = approach_data['y_reversals']
+        y_nudge = approach_data['y_micro_adjustments']
+        if y_rev > overshoot_threshold and y_nudge <= nudge_threshold:
+            result['y'] = 'OVER'
+        elif y_nudge > nudge_threshold and y_rev <= overshoot_threshold:
+            result['y'] = 'UNDER'
+        elif y_rev > overshoot_threshold and y_nudge > nudge_threshold:
+            result['y'] = 'BOTH'
+        
+        return result
+    
+    def trigger_trail_flash(self, approach_data):
+        """
+        Trigger a trail flash based on approach analysis.
+        Yellow = overshoot, Red = undershoot, Orange = both
+        """
+        classification = self.classify_shot(approach_data)
+        
+        # Determine flash type based on combined X and Y
+        has_over = classification['x'] in ('OVER', 'BOTH') or classification['y'] in ('OVER', 'BOTH')
+        has_under = classification['x'] in ('UNDER', 'BOTH') or classification['y'] in ('UNDER', 'BOTH')
+        
+        if has_over and has_under:
+            self.trail_flash_type = 'both'
+        elif has_over:
+            self.trail_flash_type = 'over'
+        elif has_under:
+            self.trail_flash_type = 'under'
+        else:
+            self.trail_flash_type = None  # Good shot, no flash
+            return
+        
+        self.trail_flash_time = time.time()
     
     def spawn_tracking_target(self):
         """Spawn a moving target for tracking mode"""
@@ -1408,6 +1604,57 @@ class AimExercise:
         
         # Add to targets list: (yaw, pitch, spawn_time)
         self.targets.append((target_yaw, target_pitch, time.time()))
+    
+    def spawn_debug_target(self):
+        """Spawn a single target for debug mode - doesn't expire"""
+        if not self.is_active or self.game_mode != 'debug':
+            return
+        
+        # Clear existing targets
+        self.targets = []
+        
+        # Reset debug visualization
+        self.debug_frozen = False
+        self.debug_analysis_points = []
+        self.debug_reversal_points = []
+        self.debug_pause_points = []
+        self.debug_x_undershoot_points = []
+        self.debug_y_undershoot_points = []
+        self.debug_x_overshoot_pos = None
+        self.debug_y_overshoot_pos = None
+        
+        # Reset path tracking for fresh measurement
+        self.path_points = [(self.yaw, self.pitch)]
+        self.has_last_hit = True  # Pretend we have a last hit so analysis works
+        self.last_hit_yaw = self.yaw
+        self.last_hit_pitch = self.pitch
+        
+        # Spawn target at a moderate distance
+        safe_width = self.canvas_width * 0.5
+        safe_height = self.canvas_height * 0.5
+        
+        center_x = self.canvas_width // 2
+        center_y = self.canvas_height // 2
+        
+        # Random screen position
+        screen_x = center_x + random.uniform(-safe_width/2, safe_width/2)
+        screen_y = center_y + random.uniform(-safe_height/2, safe_height/2)
+        
+        pixel_offset_x = screen_x - center_x
+        pixel_offset_y = screen_y - center_y
+        
+        yaw_offset = pixel_offset_x / self.pixels_per_degree
+        pitch_offset = -pixel_offset_y / self.pixels_per_degree
+        
+        target_yaw = self.yaw + yaw_offset
+        target_pitch = self.pitch + pitch_offset
+        target_pitch = max(-89, min(89, target_pitch))
+        
+        # Add target (spawn_time is ignored in debug mode)
+        self.targets.append((target_yaw, target_pitch, time.time()))
+        
+        # Clear trail for fresh visualization
+        self.trail_points = []
         
     def draw_scene(self):
         """Draw the crosshair, trail, and targets based on camera view"""
@@ -1500,6 +1747,30 @@ class AimExercise:
                     if diagnosis:
                         approach_text += f" | {diagnosis}"
                 
+                # Fourth line: last shot details and totals
+                last_shot_text = ""
+                if self.last_shot_analysis:
+                    data = self.last_shot_analysis
+                    classification = self.classify_shot(data)
+                    
+                    # Format: "LAST: HIT | X: rev=0 nudge=1 (UNDER) | Y: rev=2 nudge=0 (OVER)"
+                    last_shot_text = f"LAST: {self.last_shot_type}"
+                    last_shot_text += f" | X: rev={data['x_reversals']:.0f} nudge={data['x_micro_adjustments']:.0f}"
+                    if classification['x'] != 'good':
+                        last_shot_text += f" ({classification['x']})"
+                    last_shot_text += f" | Y: rev={data['y_reversals']:.0f} nudge={data['y_micro_adjustments']:.0f}"
+                    if classification['y'] != 'good':
+                        last_shot_text += f" ({classification['y']})"
+                    
+                    # Add totals
+                    total_samples = len(self.x_overshoots)
+                    total_x_over = sum(1 for x in self.x_overshoots if x > 0.5)
+                    total_y_over = sum(1 for y in self.y_overshoots if y > 0.5)
+                    total_x_under = sum(1 for x in self.x_micro_adjustments if x > 0.8)
+                    total_y_under = sum(1 for y in self.y_micro_adjustments if y > 0.8)
+                    
+                    last_shot_text += f" | TOTALS ({total_samples}): X-over={total_x_over} X-under={total_x_under} Y-over={total_y_over} Y-under={total_y_under}"
+                
             elif self.game_mode == 'tracking':
                 elapsed = time.time() - self.tracking_start_time
                 remaining = max(0, self.tracking_duration - elapsed)
@@ -1509,6 +1780,37 @@ class AimExercise:
                 stats_text = f"Time: {remaining:.1f}s | Tracking Accuracy: {tracking_accuracy:.1f}% | On Target: {self.tracking_time_on_target:.1f}s"
                 efficiency_text = ""
                 approach_text = ""
+                last_shot_text = ""
+            
+            elif self.game_mode == 'debug':
+                # Debug mode display
+                stats_text = f"DEBUG MODE | Hits: {self.stats.hits} | Misses: {self.stats.misses} | SPACE = new target"
+                efficiency_text = f"Path points: {len(self.path_points)} | Analysis window: last {int(self.approach_analysis_window * 100)}%"
+                
+                # Detailed approach info - show both over and under
+                approach_text = ""
+                if self.last_shot_analysis:
+                    data = self.last_shot_analysis
+                    approach_text = f"LAST: {self.last_shot_type}"
+                    # Show overshoot distances in degrees
+                    if data['x_max_overshoot'] > 0 or data['y_max_overshoot'] > 0:
+                        approach_text += f" | OVER: X={data['x_max_overshoot']:.2f}° Y={data['y_max_overshoot']:.2f}°"
+                    # Show undershoot (micro-adjustment) counts
+                    if data['x_micro_adjustments'] > 0 or data['y_micro_adjustments'] > 0:
+                        approach_text += f" | UNDER: X={data['x_micro_adjustments']:.0f} Y={data['y_micro_adjustments']:.0f}"
+                
+                # Debug markers info
+                last_shot_text = ""
+                overshoot_count = (1 if self.debug_x_overshoot_pos else 0) + (1 if self.debug_y_overshoot_pos else 0)
+                x_undershoot_count = len(self.debug_x_undershoot_points)
+                y_undershoot_count = len(self.debug_y_undershoot_points)
+                parts = []
+                if overshoot_count > 0:
+                    parts.append(f"{overshoot_count} OVER (X=yellow, Y=orange, XY=red)")
+                if x_undershoot_count > 0 or y_undershoot_count > 0:
+                    parts.append(f"UNDER X={x_undershoot_count} Y={y_undershoot_count} (cyan/magenta)")
+                if parts:
+                    last_shot_text = "Markers: " + " | ".join(parts)
             
             # Show current sensitivity (X and Y)
             stats_text += f" | X: {self.current_x_sens:.1f}% Y: {self.current_y_sens:.1f}%"
@@ -1528,7 +1830,7 @@ class AimExercise:
             )
             
             # Draw second line (efficiency breakdown) if we have data
-            if self.game_mode == 'random' and efficiency_text:
+            if (self.game_mode == 'random' or self.game_mode == 'debug') and efficiency_text:
                 self.canvas.create_text(
                     center_x,
                     55,
@@ -1539,13 +1841,24 @@ class AimExercise:
                 )
             
             # Draw third line (approach analysis) if we have data
-            if self.game_mode == 'random' and approach_text:
+            if (self.game_mode == 'random' or self.game_mode == 'debug') and approach_text:
                 self.canvas.create_text(
                     center_x,
                     80,
                     text=approach_text,
                     font=("Arial", 13),
                     fill="#ff6666",  # Light red for approach analysis
+                    tags="stats"
+                )
+            
+            # Draw fourth line (last shot details) if we have data
+            if (self.game_mode == 'random' or self.game_mode == 'debug') and last_shot_text:
+                self.canvas.create_text(
+                    center_x,
+                    105,
+                    text=last_shot_text,
+                    font=("Arial", 12),
+                    fill="#66ffff",  # Cyan for debug info
                     tags="stats"
                 )
         
@@ -1587,10 +1900,37 @@ class AimExercise:
                 age = current_time - t1
                 opacity = max(0, 1 - (age / self.trail_fade_time))
                 
-                # Convert opacity to color (cyan/blue trail)
-                blue_value = int(200 + (55 * opacity))
-                green_value = int(150 + (105 * opacity))
-                color = f'#{0:02x}{green_value:02x}{blue_value:02x}'
+                # Check if we're in a flash state
+                flash_active = False
+                if self.trail_flash_type and self.trail_flash_time:
+                    flash_age = current_time - self.trail_flash_time
+                    if flash_age < self.trail_flash_duration:
+                        flash_active = True
+                        flash_intensity = 1 - (flash_age / self.trail_flash_duration)
+                
+                if flash_active:
+                    # Flash colors based on type
+                    if self.trail_flash_type == 'over':
+                        # Yellow flash for overshoot
+                        red = int(255 * flash_intensity)
+                        green = int(255 * flash_intensity)
+                        blue = 0
+                    elif self.trail_flash_type == 'under':
+                        # Orange flash for undershoot
+                        red = int(255 * flash_intensity)
+                        green = int(128 * flash_intensity)
+                        blue = 0
+                    else:  # 'both'
+                        # Red flash for both
+                        red = int(255 * flash_intensity)
+                        green = 0
+                        blue = 0
+                    color = f'#{red:02x}{green:02x}{blue:02x}'
+                else:
+                    # Normal cyan/blue trail
+                    blue_value = int(200 + (55 * opacity))
+                    green_value = int(150 + (105 * opacity))
+                    color = f'#{0:02x}{green_value:02x}{blue_value:02x}'
                 
                 # Only draw if on screen
                 if (0 <= x1 <= self.canvas_width and 0 <= y1 <= self.canvas_height and
@@ -1601,6 +1941,79 @@ class AimExercise:
                         width=int(2 + opacity * 2),
                         tags="trail"
                     )
+        
+        # Debug mode: Draw full path visualization
+        if self.game_mode == 'debug' and len(self.path_points) > 1:
+            # Calculate analysis window start index
+            analysis_start = int(len(self.path_points) * (1 - self.approach_analysis_window))
+            
+            # Draw path points
+            for i in range(1, len(self.path_points)):
+                prev_yaw, prev_pitch = self.path_points[i - 1]
+                curr_yaw, curr_pitch = self.path_points[i]
+                
+                # Convert to screen coordinates
+                prev_yaw_diff = prev_yaw - self.yaw
+                while prev_yaw_diff > 180:
+                    prev_yaw_diff -= 360
+                while prev_yaw_diff < -180:
+                    prev_yaw_diff += 360
+                prev_x = center_x + (prev_yaw_diff * self.pixels_per_degree)
+                prev_y = center_y - ((prev_pitch - self.pitch) * self.pixels_per_degree)
+                
+                curr_yaw_diff = curr_yaw - self.yaw
+                while curr_yaw_diff > 180:
+                    curr_yaw_diff -= 360
+                while curr_yaw_diff < -180:
+                    curr_yaw_diff += 360
+                curr_x = center_x + (curr_yaw_diff * self.pixels_per_degree)
+                curr_y = center_y - ((curr_pitch - self.pitch) * self.pixels_per_degree)
+                
+                # Color: gray for early path, green for analysis window
+                if i >= analysis_start:
+                    path_color = "#00ff00"  # Green for analysis window
+                    path_width = 3
+                else:
+                    path_color = "#666666"  # Gray for early path
+                    path_width = 2
+                
+                # Draw path segment
+                if (0 <= prev_x <= self.canvas_width and 0 <= prev_y <= self.canvas_height and
+                    0 <= curr_x <= self.canvas_width and 0 <= curr_y <= self.canvas_height):
+                    self.canvas.create_line(
+                        prev_x, prev_y, curr_x, curr_y,
+                        fill=path_color,
+                        width=path_width,
+                        tags="debug_path"
+                    )
+            
+            # Draw green square at path start
+            start_yaw, start_pitch = self.path_points[0]
+            start_yaw_diff = start_yaw - self.yaw
+            while start_yaw_diff > 180:
+                start_yaw_diff -= 360
+            while start_yaw_diff < -180:
+                start_yaw_diff += 360
+            start_x = center_x + (start_yaw_diff * self.pixels_per_degree)
+            start_y = center_y - ((start_pitch - self.pitch) * self.pixels_per_degree)
+            
+            if 0 <= start_x <= self.canvas_width and 0 <= start_y <= self.canvas_height:
+                size = 6
+                self.canvas.create_rectangle(
+                    start_x - size, start_y - size,
+                    start_x + size, start_y + size,
+                    fill="#00ff00",  # Green for start
+                    outline="#ffffff",
+                    width=2,
+                    tags="debug_marker"
+                )
+                self.canvas.create_text(
+                    start_x, start_y - 15,
+                    text="START",
+                    fill="#00ff00",
+                    font=("Arial", 8, "bold"),
+                    tags="debug_marker"
+                )
         
         # Draw all targets
         targets_on_screen = []
@@ -1651,6 +2064,36 @@ class AimExercise:
                     target_color = f'#{red:02x}{green:02x}{blue:02x}'
                     outline_color = "#ffffff"
                     outline_width = 3
+                elif self.game_mode == 'debug':
+                    # Purple SQUARE target for debug mode
+                    target_color = "#9400d3"  # Dark violet/purple
+                    outline_color = "#ffffff"
+                    outline_width = 3
+                    
+                    # Draw square target instead of oval
+                    self.canvas.create_rectangle(
+                        target_screen_x - current_target_size,
+                        target_screen_y - current_target_size,
+                        target_screen_x + current_target_size,
+                        target_screen_y + current_target_size,
+                        fill=target_color,
+                        outline=outline_color,
+                        width=outline_width,
+                        tags="target"
+                    )
+                    
+                    # Draw target center dot
+                    self.canvas.create_oval(
+                        target_screen_x - 5,
+                        target_screen_y - 5,
+                        target_screen_x + 5,
+                        target_screen_y + 5,
+                        fill="#ffffff",
+                        tags="target"
+                    )
+                    
+                    # Skip the normal oval drawing below
+                    continue
                 else:
                     target_color = "#ff0000"
                     outline_color = "#ffffff"
@@ -1757,6 +2200,220 @@ class AimExercise:
                             tags="tracking_target"
                         )
         
+        # Debug mode: Draw markers on top of targets
+        if self.game_mode == 'debug':
+            # Draw overshoot markers - combine into "XY" if positions are close
+            x_pos = None
+            y_pos = None
+            
+            if self.debug_x_overshoot_pos is not None:
+                yaw, pitch = self.debug_x_overshoot_pos
+                yaw_diff = yaw - self.yaw
+                while yaw_diff > 180:
+                    yaw_diff -= 360
+                while yaw_diff < -180:
+                    yaw_diff += 360
+                x_pos = (center_x + (yaw_diff * self.pixels_per_degree),
+                         center_y - ((pitch - self.pitch) * self.pixels_per_degree))
+            
+            if self.debug_y_overshoot_pos is not None:
+                yaw, pitch = self.debug_y_overshoot_pos
+                yaw_diff = yaw - self.yaw
+                while yaw_diff > 180:
+                    yaw_diff -= 360
+                while yaw_diff < -180:
+                    yaw_diff += 360
+                y_pos = (center_x + (yaw_diff * self.pixels_per_degree),
+                         center_y - ((pitch - self.pitch) * self.pixels_per_degree))
+            
+            # Check if markers are close enough to combine (within 25 pixels)
+            combine_threshold = 25
+            should_combine = False
+            if x_pos and y_pos:
+                dist = math.sqrt((x_pos[0] - y_pos[0])**2 + (x_pos[1] - y_pos[1])**2)
+                should_combine = dist < combine_threshold
+            
+            if should_combine:
+                # Draw combined XY marker (use X position, green color)
+                x, y = x_pos
+                if 0 <= x <= self.canvas_width and 0 <= y <= self.canvas_height:
+                    self.canvas.create_oval(
+                        x - 12, y - 12, x + 12, y + 12,
+                        fill="#ff0000",  # Red for combined XY
+                        outline="#000000",
+                        width=2,
+                        tags="debug_marker"
+                    )
+                    self.canvas.create_text(
+                        x, y,
+                        text="XY",
+                        fill="#000000",
+                        font=("Arial", 10, "bold"),
+                        tags="debug_marker"
+                    )
+            else:
+                # Draw X marker separately
+                if x_pos:
+                    x, y = x_pos
+                    if 0 <= x <= self.canvas_width and 0 <= y <= self.canvas_height:
+                        self.canvas.create_oval(
+                            x - 10, y - 10, x + 10, y + 10,
+                            fill="#ffff00",  # Yellow for X overshoot
+                            outline="#000000",
+                            width=2,
+                            tags="debug_marker"
+                        )
+                        self.canvas.create_text(
+                            x, y,
+                            text="X",
+                            fill="#000000",
+                            font=("Arial", 11, "bold"),
+                            tags="debug_marker"
+                        )
+                
+                # Draw Y marker separately
+                if y_pos:
+                    x, y = y_pos
+                    if 0 <= x <= self.canvas_width and 0 <= y <= self.canvas_height:
+                        self.canvas.create_oval(
+                            x - 10, y - 10, x + 10, y + 10,
+                            fill="#ff8800",  # Orange for Y overshoot
+                            outline="#000000",
+                            width=2,
+                            tags="debug_marker"
+                        )
+                        self.canvas.create_text(
+                            x, y,
+                            text="Y",
+                            fill="#000000",
+                            font=("Arial", 11, "bold"),
+                            tags="debug_marker"
+                        )
+            
+            # Draw UNDER markers - X undershoots (cyan with "X") and Y undershoots (magenta with "Y")
+            # First, collect all undershoot positions
+            x_under_positions = []
+            for yaw, pitch in self.debug_x_undershoot_points:
+                yaw_diff = yaw - self.yaw
+                while yaw_diff > 180:
+                    yaw_diff -= 360
+                while yaw_diff < -180:
+                    yaw_diff += 360
+                x_under_positions.append((
+                    center_x + (yaw_diff * self.pixels_per_degree),
+                    center_y - ((pitch - self.pitch) * self.pixels_per_degree),
+                    'X'
+                ))
+            
+            y_under_positions = []
+            for yaw, pitch in self.debug_y_undershoot_points:
+                yaw_diff = yaw - self.yaw
+                while yaw_diff > 180:
+                    yaw_diff -= 360
+                while yaw_diff < -180:
+                    yaw_diff += 360
+                y_under_positions.append((
+                    center_x + (yaw_diff * self.pixels_per_degree),
+                    center_y - ((pitch - self.pitch) * self.pixels_per_degree),
+                    'Y'
+                ))
+            
+            # Check for overlapping X and Y undershoots and combine them
+            combine_threshold = 25
+            used_y_indices = set()
+            
+            for x_pos in x_under_positions:
+                x, y, _ = x_pos
+                if not (0 <= x <= self.canvas_width and 0 <= y <= self.canvas_height):
+                    continue
+                
+                # Check if there's a nearby Y undershoot to combine with
+                combined = False
+                for i, y_pos in enumerate(y_under_positions):
+                    if i in used_y_indices:
+                        continue
+                    yx, yy, _ = y_pos
+                    dist = math.sqrt((x - yx)**2 + (y - yy)**2)
+                    if dist < combine_threshold:
+                        # Draw combined XY undershoot (purple)
+                        self.canvas.create_oval(
+                            x - 10, y - 10, x + 10, y + 10,
+                            fill="#ff00ff",  # Purple for combined XY undershoot
+                            outline="#000000",
+                            width=2,
+                            tags="debug_marker"
+                        )
+                        self.canvas.create_text(
+                            x, y,
+                            text="XY",
+                            fill="#000000",
+                            font=("Arial", 9, "bold"),
+                            tags="debug_marker"
+                        )
+                        used_y_indices.add(i)
+                        combined = True
+                        break
+                
+                if not combined:
+                    # Draw X undershoot alone (cyan)
+                    self.canvas.create_oval(
+                        x - 8, y - 8, x + 8, y + 8,
+                        fill="#00ffff",  # Cyan for X undershoot
+                        outline="#000000",
+                        width=2,
+                        tags="debug_marker"
+                    )
+                    self.canvas.create_text(
+                        x, y,
+                        text="X",
+                        fill="#000000",
+                        font=("Arial", 10, "bold"),
+                        tags="debug_marker"
+                    )
+            
+            # Draw remaining Y undershoots that weren't combined
+            for i, y_pos in enumerate(y_under_positions):
+                if i in used_y_indices:
+                    continue
+                x, y, _ = y_pos
+                if not (0 <= x <= self.canvas_width and 0 <= y <= self.canvas_height):
+                    continue
+                
+                # Draw Y undershoot alone (magenta/pink)
+                self.canvas.create_oval(
+                    x - 8, y - 8, x + 8, y + 8,
+                    fill="#ff66ff",  # Magenta/pink for Y undershoot
+                    outline="#000000",
+                    width=2,
+                    tags="debug_marker"
+                )
+                self.canvas.create_text(
+                    x, y,
+                    text="Y",
+                    fill="#000000",
+                    font=("Arial", 10, "bold"),
+                    tags="debug_marker"
+                )
+            
+            # Draw pause points (small red dots - where movement stopped)
+            for yaw, pitch in self.debug_pause_points:
+                yaw_diff = yaw - self.yaw
+                while yaw_diff > 180:
+                    yaw_diff -= 360
+                while yaw_diff < -180:
+                    yaw_diff += 360
+                x = center_x + (yaw_diff * self.pixels_per_degree)
+                y = center_y - ((pitch - self.pitch) * self.pixels_per_degree)
+                
+                if 0 <= x <= self.canvas_width and 0 <= y <= self.canvas_height:
+                    self.canvas.create_oval(
+                        x - 4, y - 4, x + 4, y + 4,
+                        fill="#ff0000",  # Red for pauses
+                        outline="#ffffff",
+                        width=1,
+                        tags="debug_marker"
+                    )
+        
         # Draw crosshair last (on top of everything)
         self.draw_crosshair(center_x, center_y)
             
@@ -1779,6 +2436,8 @@ class AimExercise:
         
         if self.game_mode == 'random':
             self.handle_random_mode_shot()
+        elif self.game_mode == 'debug':
+            self.handle_debug_mode_shot()
     
     def handle_random_mode_shot(self):
         """Handle shooting in random targets mode"""
@@ -1844,6 +2503,12 @@ class AimExercise:
                     self.y_overshoots.append(approach_data['y_reversals'])
                     self.x_micro_adjustments.append(approach_data['x_micro_adjustments'])
                     self.y_micro_adjustments.append(approach_data['y_micro_adjustments'])
+                    # Store for detailed display
+                    self.last_shot_analysis = approach_data
+                    self.last_shot_was_hit = True
+                    self.last_shot_type = "HIT"
+                    # Trigger trail flash based on classification
+                    self.trigger_trail_flash(approach_data)
             
             # Record this hit position for next path measurement
             self.record_hit_position()
@@ -1852,8 +2517,103 @@ class AimExercise:
             self.spawn_target()
             self.update_stats_display()
         else:
+            # Miss - find closest target to analyze approach
             self.stats.record_miss()
+            
+            # Find the closest target to crosshair (most likely intended target)
+            closest_target = None
+            closest_distance = float('inf')
+            
+            for target_yaw, target_pitch, spawn_time in self.targets:
+                yaw_diff = target_yaw - self.yaw
+                pitch_diff = target_pitch - self.pitch
+                
+                while yaw_diff > 180:
+                    yaw_diff -= 360
+                while yaw_diff < -180:
+                    yaw_diff += 360
+                
+                angular_distance = math.sqrt(yaw_diff**2 + pitch_diff**2)
+                
+                if angular_distance < closest_distance:
+                    closest_distance = angular_distance
+                    closest_target = (target_yaw, target_pitch)
+            
+            # Analyze approach toward the closest target (the likely intended target)
+            if closest_target and self.has_last_hit:
+                target_yaw, target_pitch = closest_target
+                
+                # Analyze final approach for overshoot/undershoot patterns
+                approach_data = self.analyze_final_approach(target_yaw, target_pitch)
+                if approach_data:
+                    self.x_overshoots.append(approach_data['x_reversals'])
+                    self.y_overshoots.append(approach_data['y_reversals'])
+                    self.x_micro_adjustments.append(approach_data['x_micro_adjustments'])
+                    self.y_micro_adjustments.append(approach_data['y_micro_adjustments'])
+                    # Store for detailed display
+                    self.last_shot_analysis = approach_data
+                    self.last_shot_was_hit = False
+                    self.last_shot_type = "MISS"
+                    # Trigger trail flash based on classification
+                    self.trigger_trail_flash(approach_data)
+            
+            # Reset path for next attempt (don't update last_hit position since we missed)
+            self.path_points = [(self.yaw, self.pitch)]
+            
             self.update_stats_display()
+    
+    def handle_debug_mode_shot(self):
+        """Handle shooting in debug test mode"""
+        if not self.targets:
+            return
+        
+        # Get the single target
+        target_yaw, target_pitch, spawn_time = self.targets[0]
+        
+        # Check if we hit (SQUARE hitbox for debug mode)
+        yaw_diff = target_yaw - self.yaw
+        pitch_diff = target_pitch - self.pitch
+        
+        while yaw_diff > 180:
+            yaw_diff -= 360
+        while yaw_diff < -180:
+            yaw_diff += 360
+        
+        target_angular_size = self.target_size / self.pixels_per_degree
+        
+        # Square hitbox: hit if BOTH X and Y are within target bounds
+        hit = (abs(yaw_diff) <= target_angular_size and abs(pitch_diff) <= target_angular_size)
+        
+        # Record stats first
+        if hit:
+            self.stats.record_hit(time.time() - spawn_time)
+            self.play_sound('hit')
+            self.last_shot_type = "HIT"
+        else:
+            self.stats.record_miss()
+            self.last_shot_type = "MISS"
+        
+        self.last_shot_was_hit = hit
+        
+        # Analyze approach with debug capture (may return None if not enough points)
+        approach_data = self.analyze_final_approach(target_yaw, target_pitch, capture_debug=True)
+        
+        if approach_data:
+            self.last_shot_analysis = approach_data
+            # Trigger trail flash
+            self.trigger_trail_flash(approach_data)
+        else:
+            # Not enough path data - clear previous analysis
+            self.last_shot_analysis = None
+            self.debug_reversal_points = []
+            self.debug_pause_points = []
+            self.debug_x_undershoot_points = []
+            self.debug_y_undershoot_points = []
+            self.debug_x_overshoot_pos = None
+            self.debug_y_overshoot_pos = None
+        
+        # Don't auto-spawn new target in debug mode - user presses SPACE
+        # Keep the visualization on screen
     
     def on_focus_lost(self, event):
         """Handle window losing focus (tabbing out)"""
