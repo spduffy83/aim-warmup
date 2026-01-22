@@ -859,6 +859,15 @@ class AimExercise:
         self.trail_flash_type = None
         self.trail_flash_time = 0
         
+        # Reset debug/analysis markers (used in both debug and random modes)
+        self.debug_x_overshoot_pos = None
+        self.debug_y_overshoot_pos = None
+        self.debug_x_undershoot_points = []
+        self.debug_y_undershoot_points = []
+        self.debug_pause_points = []
+        self.debug_reversal_points = []
+        self.debug_analysis_points = []
+        
         # Reset session timer
         self.session_timer = 0.0
         self.last_timer_update = time.time()
@@ -870,8 +879,12 @@ class AimExercise:
         
         # Spawn initial targets based on mode
         if self.game_mode == 'random':
-            for _ in range(self.num_targets):
-                self.spawn_target()
+            # Spawn targets with color coding (red=active, yellow=next, blue=others)
+            self.targets = []
+            for i in range(self.num_targets):
+                self.spawn_target_at_random_position()
+            # Assign colors: first=red, second=yellow, rest=blue
+            self.assign_target_colors()
         elif self.game_mode == 'tracking':
             self.tracking_start_time = time.time()
             self.tracking_time_on_target = 0.0
@@ -1570,7 +1583,7 @@ class AimExercise:
         
         self.tracking_total_time += delta_time
             
-    def spawn_target(self):
+    def spawn_target_at_random_position(self):
         """Spawn a new target at random position within visible screen bounds"""
         if not self.is_active:
             return
@@ -1602,8 +1615,43 @@ class AimExercise:
         # Clamp pitch to reasonable bounds
         target_pitch = max(-89, min(89, target_pitch))
         
-        # Add to targets list: (yaw, pitch, spawn_time)
-        self.targets.append((target_yaw, target_pitch, time.time()))
+        # Add to targets list as dict (color will be assigned by assign_target_colors)
+        self.targets.append({
+            'yaw': target_yaw,
+            'pitch': target_pitch,
+            'spawn_time': time.time(),
+            'color': 'blue'  # Default, will be reassigned
+        })
+    
+    def assign_target_colors(self):
+        """Assign colors to targets: red=active, yellow=next, blue=others"""
+        for i, target in enumerate(self.targets):
+            if i == 0:
+                target['color'] = 'red'
+            elif i == 1:
+                target['color'] = 'yellow'
+            else:
+                target['color'] = 'blue'
+    
+    def cycle_target_colors(self):
+        """Cycle colors after red target is removed: yellow->red, random blue->yellow"""
+        # Find the yellow target and make it red
+        for target in self.targets:
+            if target['color'] == 'yellow':
+                target['color'] = 'red'
+                break
+        
+        # Find a random blue target and make it yellow
+        blue_targets = [t for t in self.targets if t['color'] == 'blue']
+        if blue_targets:
+            random.choice(blue_targets)['color'] = 'yellow'
+    
+    def get_red_target(self):
+        """Get the current red (active) target"""
+        for target in self.targets:
+            if target['color'] == 'red':
+                return target
+        return None
     
     def spawn_debug_target(self):
         """Spawn a single target for debug mode - doesn't expire"""
@@ -1734,42 +1782,33 @@ class AimExercise:
                 if avg_y_eff > 0:
                     efficiency_text += f" | Y: {avg_y_eff:.1f}%"
                 
-                # Third line: approach analysis (overshoot/undershoot detection)
+                # Third line: approach analysis (overshoot/undershoot from last shot)
                 approach_text = ""
-                x_over, y_over = self.get_average_overshoots()
-                x_micro, y_micro = self.get_average_micro_adjustments()
-                
-                if x_over > 0 or y_over > 0 or x_micro > 0 or y_micro > 0:
-                    approach_text = f"Reversals - X: {x_over:.1f} Y: {y_over:.1f} | Nudges - X: {x_micro:.1f} Y: {y_micro:.1f}"
-                    
-                    # Add sensitivity diagnosis
-                    diagnosis = self.get_sensitivity_diagnosis()
-                    if diagnosis:
-                        approach_text += f" | {diagnosis}"
-                
-                # Fourth line: last shot details and totals
-                last_shot_text = ""
                 if self.last_shot_analysis:
                     data = self.last_shot_analysis
-                    classification = self.classify_shot(data)
-                    
-                    # Format: "LAST: HIT | X: rev=0 nudge=1 (UNDER) | Y: rev=2 nudge=0 (OVER)"
-                    last_shot_text = f"LAST: {self.last_shot_type}"
-                    last_shot_text += f" | X: rev={data['x_reversals']:.0f} nudge={data['x_micro_adjustments']:.0f}"
-                    if classification['x'] != 'good':
-                        last_shot_text += f" ({classification['x']})"
-                    last_shot_text += f" | Y: rev={data['y_reversals']:.0f} nudge={data['y_micro_adjustments']:.0f}"
-                    if classification['y'] != 'good':
-                        last_shot_text += f" ({classification['y']})"
-                    
-                    # Add totals
-                    total_samples = len(self.x_overshoots)
+                    approach_text = f"LAST: {self.last_shot_type}"
+                    # Show overshoot distances in degrees
+                    if data['x_max_overshoot'] > 0 or data['y_max_overshoot'] > 0:
+                        approach_text += f" | OVER: X={data['x_max_overshoot']:.2f}° Y={data['y_max_overshoot']:.2f}°"
+                    # Show undershoot (micro-adjustment) counts
+                    if data['x_micro_adjustments'] > 0 or data['y_micro_adjustments'] > 0:
+                        approach_text += f" | UNDER: X={data['x_micro_adjustments']:.0f} Y={data['y_micro_adjustments']:.0f}"
+                
+                # Fourth line: totals and sensitivity diagnosis
+                last_shot_text = ""
+                total_samples = len(self.x_overshoots)
+                if total_samples > 0:
                     total_x_over = sum(1 for x in self.x_overshoots if x > 0.5)
                     total_y_over = sum(1 for y in self.y_overshoots if y > 0.5)
                     total_x_under = sum(1 for x in self.x_micro_adjustments if x > 0.8)
                     total_y_under = sum(1 for y in self.y_micro_adjustments if y > 0.8)
                     
-                    last_shot_text += f" | TOTALS ({total_samples}): X-over={total_x_over} X-under={total_x_under} Y-over={total_y_over} Y-under={total_y_under}"
+                    last_shot_text = f"TOTALS ({total_samples}): X-over={total_x_over} X-under={total_x_under} Y-over={total_y_over} Y-under={total_y_under}"
+                    
+                    # Add sensitivity diagnosis
+                    diagnosis = self.get_sensitivity_diagnosis()
+                    if diagnosis:
+                        last_shot_text += f" | {diagnosis}"
                 
             elif self.game_mode == 'tracking':
                 elapsed = time.time() - self.tracking_start_time
@@ -2017,60 +2056,122 @@ class AimExercise:
         
         # Draw all targets
         targets_on_screen = []
-        for idx, (target_yaw, target_pitch, spawn_time) in enumerate(self.targets):
-            yaw_diff = target_yaw - self.yaw
-            pitch_diff = target_pitch - self.pitch
-            
-            while yaw_diff > 180:
-                yaw_diff -= 360
-            while yaw_diff < -180:
-                yaw_diff += 360
-            
-            target_screen_x = center_x + (yaw_diff * self.pixels_per_degree)
-            target_screen_y = center_y - (pitch_diff * self.pixels_per_degree)
-            
-            # Calculate target age
-            target_age = current_time - spawn_time
-            
-            # For random mode: check if target expired
-            if self.game_mode == 'random' and target_age >= self.target_lifetime:
-                # Target expired, don't add to on_screen list (will be removed)
-                self.stats.record_miss()  # Count as miss
-                # Play miss sound
-                self.play_sound('miss')
-                continue
-            
-            # Calculate shrinking size for random mode
-            if self.game_mode == 'random':
-                # Start at max size and shrink to min over lifetime
-                shrink_progress = target_age / self.target_lifetime  # 0 to 1 over lifetime
-                current_target_size = self.target_max_size - (self.target_max_size - self.target_min_size) * shrink_progress
-            else:
+        red_target_expired = False
+        
+        if self.game_mode == 'random':
+            # Random mode: dict format with color coding
+            for target in self.targets:
+                target_yaw = target['yaw']
+                target_pitch = target['pitch']
+                spawn_time = target['spawn_time']
+                target_color_name = target['color']
+                
+                yaw_diff = target_yaw - self.yaw
+                pitch_diff = target_pitch - self.pitch
+                
+                while yaw_diff > 180:
+                    yaw_diff -= 360
+                while yaw_diff < -180:
+                    yaw_diff += 360
+                
+                target_screen_x = center_x + (yaw_diff * self.pixels_per_degree)
+                target_screen_y = center_y - (pitch_diff * self.pixels_per_degree)
+                
+                # Calculate target age
+                target_age = current_time - spawn_time
+                
+                # Only red target can expire
+                if target_color_name == 'red' and target_age >= self.target_lifetime:
+                    red_target_expired = True
+                    self.stats.record_miss()
+                    self.play_sound('miss')
+                    continue
+                
+                # Fixed size (no shrinking)
                 current_target_size = self.target_size
-            
-            margin = current_target_size + 10
-            if (-margin <= target_screen_x <= self.canvas_width + margin and 
-                -margin <= target_screen_y <= self.canvas_height + margin):
                 
-                targets_on_screen.append((target_yaw, target_pitch, spawn_time))
-                
-                if self.game_mode == 'random':
-                    # Fade from purple to blue over lifetime
-                    shrink_progress = target_age / self.target_lifetime  # 0 to 1
-                    # Purple (148, 0, 211) to Blue (0, 100, 255)
-                    red = int(148 * (1 - shrink_progress))
-                    green = int(100 * shrink_progress)
-                    blue = int(211 + (255 - 211) * shrink_progress)
-                    target_color = f'#{red:02x}{green:02x}{blue:02x}'
-                    outline_color = "#ffffff"
-                    outline_width = 3
-                elif self.game_mode == 'debug':
-                    # Purple SQUARE target for debug mode
-                    target_color = "#9400d3"  # Dark violet/purple
+                margin = current_target_size + 10
+                if (-margin <= target_screen_x <= self.canvas_width + margin and 
+                    -margin <= target_screen_y <= self.canvas_height + margin):
+                    
+                    targets_on_screen.append(target)
+                    
+                    # Set color based on target type
+                    if target_color_name == 'red':
+                        fill_color = "#ff0000"  # Red
+                    elif target_color_name == 'yellow':
+                        fill_color = "#ffff00"  # Yellow
+                    else:
+                        fill_color = "#0066ff"  # Blue
+                    
                     outline_color = "#ffffff"
                     outline_width = 3
                     
-                    # Draw square target instead of oval
+                    # Draw SQUARE target
+                    self.canvas.create_rectangle(
+                        target_screen_x - current_target_size,
+                        target_screen_y - current_target_size,
+                        target_screen_x + current_target_size,
+                        target_screen_y + current_target_size,
+                        fill=fill_color,
+                        outline=outline_color,
+                        width=outline_width,
+                        tags="target"
+                    )
+                    
+                    # Draw target center dot
+                    self.canvas.create_oval(
+                        target_screen_x - 5,
+                        target_screen_y - 5,
+                        target_screen_x + 5,
+                        target_screen_y + 5,
+                        fill="#ffffff",
+                        tags="target"
+                    )
+            
+            # Update targets list and handle expiration
+            self.targets = targets_on_screen
+            
+            if red_target_expired:
+                # Cycle colors and spawn new blue target
+                self.cycle_target_colors()
+                self.spawn_target_at_random_position()
+                # New target is blue by default, which is correct
+                
+                # Reset path for next attempt
+                self.path_points = [(self.yaw, self.pitch)]
+            
+            # Ensure we always have enough targets
+            while len(self.targets) < self.num_targets:
+                self.spawn_target_at_random_position()
+                
+        elif self.game_mode == 'debug':
+            # Debug mode: tuple format (yaw, pitch, spawn_time)
+            for idx, (target_yaw, target_pitch, spawn_time) in enumerate(self.targets):
+                yaw_diff = target_yaw - self.yaw
+                pitch_diff = target_pitch - self.pitch
+                
+                while yaw_diff > 180:
+                    yaw_diff -= 360
+                while yaw_diff < -180:
+                    yaw_diff += 360
+                
+                target_screen_x = center_x + (yaw_diff * self.pixels_per_degree)
+                target_screen_y = center_y - (pitch_diff * self.pixels_per_degree)
+                
+                current_target_size = self.target_size
+                
+                margin = current_target_size + 10
+                if (-margin <= target_screen_x <= self.canvas_width + margin and 
+                    -margin <= target_screen_y <= self.canvas_height + margin):
+                    
+                    targets_on_screen.append((target_yaw, target_pitch, spawn_time))
+                    
+                    # Purple SQUARE target for debug mode
+                    target_color = "#9400d3"
+                    outline_color = "#ffffff"
+                    outline_width = 3
+                    
                     self.canvas.create_rectangle(
                         target_screen_x - current_target_size,
                         target_screen_y - current_target_size,
@@ -2091,41 +2192,6 @@ class AimExercise:
                         fill="#ffffff",
                         tags="target"
                     )
-                    
-                    # Skip the normal oval drawing below
-                    continue
-                else:
-                    target_color = "#ff0000"
-                    outline_color = "#ffffff"
-                    outline_width = 3
-                
-                # Draw target
-                self.canvas.create_oval(
-                    target_screen_x - current_target_size,
-                    target_screen_y - current_target_size,
-                    target_screen_x + current_target_size,
-                    target_screen_y + current_target_size,
-                    fill=target_color,
-                    outline=outline_color,
-                    width=outline_width,
-                    tags="target"
-                )
-                
-                # Draw target center dot
-                self.canvas.create_oval(
-                    target_screen_x - 5,
-                    target_screen_y - 5,
-                    target_screen_x + 5,
-                    target_screen_y + 5,
-                    fill="#ffffff",
-                    tags="target"
-                )
-        
-        # Update targets list (for random mode to respawn)
-        if self.game_mode == 'random':
-            self.targets = targets_on_screen
-            while len(self.targets) < self.num_targets:
-                self.spawn_target()
         
         # Draw tracking targets
         if self.game_mode == 'tracking':
@@ -2200,8 +2266,8 @@ class AimExercise:
                             tags="tracking_target"
                         )
         
-        # Debug mode: Draw markers on top of targets
-        if self.game_mode == 'debug':
+        # Debug and Random mode: Draw OVER/UNDER markers on top of targets
+        if self.game_mode in ('debug', 'random'):
             # Draw overshoot markers - combine into "XY" if positions are close
             x_pos = None
             y_pos = None
@@ -2440,45 +2506,43 @@ class AimExercise:
             self.handle_debug_mode_shot()
     
     def handle_random_mode_shot(self):
-        """Handle shooting in random targets mode"""
-        hit_target = None
-        min_distance = float('inf')
-        hit_target_angular_size = 0
+        """Handle shooting in random targets mode - must hit red target"""
+        # Get the red (active) target
+        red_target = self.get_red_target()
         
-        # Check each target to see if any were hit
-        for i, (target_yaw, target_pitch, spawn_time) in enumerate(self.targets):
-            yaw_diff = target_yaw - self.yaw
-            pitch_diff = target_pitch - self.pitch
-            
-            while yaw_diff > 180:
-                yaw_diff -= 360
-            while yaw_diff < -180:
-                yaw_diff += 360
-            
-            angular_distance = math.sqrt(yaw_diff**2 + pitch_diff**2)
-            
-            # Calculate current shrinking size
-            target_age = time.time() - spawn_time
-            shrink_progress = target_age / self.target_lifetime  # 0 to 1 over lifetime
-            current_target_size = self.target_max_size - (self.target_max_size - self.target_min_size) * shrink_progress
-            target_angular_size = current_target_size / self.pixels_per_degree
-            
-            if angular_distance <= target_angular_size:
-                if angular_distance < min_distance:
-                    min_distance = angular_distance
-                    hit_target = (i, spawn_time)
-                    hit_target_angular_size = target_angular_size
+        if not red_target:
+            return
         
-        if hit_target is not None:
-            target_index, spawn_time = hit_target
-            target_yaw, target_pitch, _ = self.targets[target_index]
+        target_yaw = red_target['yaw']
+        target_pitch = red_target['pitch']
+        spawn_time = red_target['spawn_time']
+        
+        # Check if we hit the RED target (SQUARE hitbox)
+        yaw_diff = target_yaw - self.yaw
+        pitch_diff = target_pitch - self.pitch
+        
+        while yaw_diff > 180:
+            yaw_diff -= 360
+        while yaw_diff < -180:
+            yaw_diff += 360
+        
+        target_angular_size = self.target_size / self.pixels_per_degree
+        
+        # Square hitbox: hit if BOTH X and Y are within target bounds
+        hit_red = (abs(yaw_diff) <= target_angular_size and abs(pitch_diff) <= target_angular_size)
+        
+        if hit_red:
+            # HIT the red target
             reaction_time = time.time() - spawn_time
             self.stats.record_hit(reaction_time)
             
             # Calculate hit precision (100% = center, 0% = edge)
-            if hit_target_angular_size > 0:
-                precision = (1 - (min_distance / hit_target_angular_size)) * 100
-                self.hit_precisions.append(precision)
+            # For square, use max of X and Y distance ratio
+            x_ratio = abs(yaw_diff) / target_angular_size if target_angular_size > 0 else 0
+            y_ratio = abs(pitch_diff) / target_angular_size if target_angular_size > 0 else 0
+            max_ratio = max(x_ratio, y_ratio)
+            precision = (1 - max_ratio) * 100
+            self.hit_precisions.append(precision)
             
             # Play hit sound
             self.play_sound('hit')
@@ -2497,7 +2561,7 @@ class AimExercise:
                     self.y_efficiencies.append(y_eff)
                 
                 # Analyze final approach for overshoot/undershoot patterns
-                approach_data = self.analyze_final_approach(target_yaw, target_pitch)
+                approach_data = self.analyze_final_approach(target_yaw, target_pitch, capture_debug=True)
                 if approach_data:
                     self.x_overshoots.append(approach_data['x_reversals'])
                     self.y_overshoots.append(approach_data['y_reversals'])
@@ -2513,38 +2577,20 @@ class AimExercise:
             # Record this hit position for next path measurement
             self.record_hit_position()
             
-            del self.targets[target_index]
-            self.spawn_target()
+            # Remove red target, cycle colors, spawn new blue
+            self.targets.remove(red_target)
+            self.cycle_target_colors()
+            self.spawn_target_at_random_position()
+            # New target is blue by default
+            
             self.update_stats_display()
         else:
-            # Miss - find closest target to analyze approach
+            # MISS - clicked but didn't hit red target (maybe hit yellow/blue or nothing)
             self.stats.record_miss()
             
-            # Find the closest target to crosshair (most likely intended target)
-            closest_target = None
-            closest_distance = float('inf')
-            
-            for target_yaw, target_pitch, spawn_time in self.targets:
-                yaw_diff = target_yaw - self.yaw
-                pitch_diff = target_pitch - self.pitch
-                
-                while yaw_diff > 180:
-                    yaw_diff -= 360
-                while yaw_diff < -180:
-                    yaw_diff += 360
-                
-                angular_distance = math.sqrt(yaw_diff**2 + pitch_diff**2)
-                
-                if angular_distance < closest_distance:
-                    closest_distance = angular_distance
-                    closest_target = (target_yaw, target_pitch)
-            
-            # Analyze approach toward the closest target (the likely intended target)
-            if closest_target and self.has_last_hit:
-                target_yaw, target_pitch = closest_target
-                
-                # Analyze final approach for overshoot/undershoot patterns
-                approach_data = self.analyze_final_approach(target_yaw, target_pitch)
+            # Still analyze approach toward the red target
+            if self.has_last_hit:
+                approach_data = self.analyze_final_approach(target_yaw, target_pitch, capture_debug=True)
                 if approach_data:
                     self.x_overshoots.append(approach_data['x_reversals'])
                     self.y_overshoots.append(approach_data['y_reversals'])
