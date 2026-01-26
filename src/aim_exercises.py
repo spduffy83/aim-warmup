@@ -61,8 +61,8 @@ class AimExercise:
         self.fn_sens_constant = 164.6
         
         # Current sensitivity values (will be set properly after UI creation)
-        self.current_x_sens = 5.1
-        self.current_y_sens = 7.3  # Default Y sensitivity
+        self.current_x_sens = 5.0
+        self.current_y_sens = 7.2  # Default Y sensitivity
         
         # Virtual camera yaw/pitch (in degrees)
         self.yaw = 0.0
@@ -152,6 +152,10 @@ class AimExercise:
         # Hit precision tracking (how close to center)
         self.hit_precisions = []  # List of precision percentages (100% = center)
         
+        # Scoped sensitivity (activated by holding right-click)
+        self.scoped_sens_percent = 49.9  # % of base sensitivity when scoped (like Fortnite ADS)
+        self.scoped_active = False  # Whether right-click is held
+        
         # Mouse controller
         self.mouse = MouseController()
         self.center_x = screen_width // 2
@@ -180,7 +184,7 @@ class AimExercise:
             try:
                 x_fn_sens = float(self.x_sens_var.get())
             except (ValueError, AttributeError):
-                x_fn_sens = 5.1  # Default
+                x_fn_sens = 5.0  # Default
         
         if y_fn_sens is None:
             try:
@@ -219,8 +223,8 @@ class AimExercise:
             x_val = round(x_val, 1)
             self.x_sens_var.set(f"{x_val:.1f}")
         except ValueError:
-            x_val = 5.1
-            self.x_sens_var.set("5.1")
+            x_val = 5.0
+            self.x_sens_var.set("5.0")
         
         try:
             y_val = float(self.y_sens_var.get())
@@ -238,6 +242,18 @@ class AimExercise:
             btn.config(bg="#444444")
         for btn in self.y_sens_buttons.values():
             btn.config(bg="#444444")
+    
+    def apply_scoped_sensitivity(self):
+        """Apply scoped sensitivity from the entry field"""
+        try:
+            scoped_val = float(self.scoped_sens_var.get())
+            # Round to 1 decimal place and clamp to 1-100%
+            scoped_val = max(1.0, min(100.0, round(scoped_val, 1)))
+            self.scoped_sens_var.set(f"{scoped_val:.1f}")
+            self.scoped_sens_percent = scoped_val
+        except ValueError:
+            self.scoped_sens_var.set("49.9")
+            self.scoped_sens_percent = 49.9
     
     def generate_sounds(self):
         """Generate procedural sound effects"""
@@ -425,7 +441,7 @@ class AimExercise:
         self.sens_label.pack(side=tk.LEFT, padx=(0, 10))
         
         # X sensitivity numeric entry
-        self.x_sens_var = tk.StringVar(value="5.1")
+        self.x_sens_var = tk.StringVar(value="5.0")
         self.x_sens_entry = tk.Entry(
             self.x_sens_row,
             textvariable=self.x_sens_var,
@@ -481,7 +497,7 @@ class AimExercise:
         self.y_sens_label.pack(side=tk.LEFT, padx=(0, 10))
         
         # Y sensitivity numeric entry
-        self.y_sens_var = tk.StringVar(value="7.3")
+        self.y_sens_var = tk.StringVar(value="7.2")
         self.y_sens_entry = tk.Entry(
             self.y_sens_row,
             textvariable=self.y_sens_var,
@@ -522,6 +538,73 @@ class AimExercise:
             )
             btn.pack(side=tk.LEFT, padx=2)
             self.y_sens_buttons[option_num] = btn
+        
+        # Scoped Sensitivity row (new)
+        self.scoped_sens_row = tk.Frame(self.sens_frame, bg="#1a1a1a")
+        self.scoped_sens_row.pack(pady=3)
+        
+        self.scoped_sens_label = tk.Label(
+            self.scoped_sens_row,
+            text="Scoped:",
+            font=("Arial", 11),
+            bg="#1a1a1a",
+            fg="#aaaaaa"
+        )
+        self.scoped_sens_label.pack(side=tk.LEFT, padx=(0, 10))
+        
+        # Scoped sensitivity numeric entry
+        self.scoped_sens_var = tk.StringVar(value="49.9")
+        self.scoped_sens_entry = tk.Entry(
+            self.scoped_sens_row,
+            textvariable=self.scoped_sens_var,
+            font=("Arial", 12, "bold"),
+            width=6,
+            justify=tk.CENTER,
+            bg="#333333",
+            fg="#ff9900",
+            insertbackground="#ff9900",
+            relief=tk.FLAT
+        )
+        self.scoped_sens_entry.pack(side=tk.LEFT, padx=(0, 5))
+        self.scoped_sens_entry.bind('<Return>', lambda e: self.apply_scoped_sensitivity())
+        self.scoped_sens_entry.bind('<FocusOut>', lambda e: self.apply_scoped_sensitivity())
+        
+        self.scoped_sens_percent_label = tk.Label(
+            self.scoped_sens_row,
+            text="% of base",
+            font=("Arial", 11),
+            bg="#1a1a1a",
+            fg="#aaaaaa"
+        )
+        self.scoped_sens_percent_label.pack(side=tk.LEFT, padx=(0, 15))
+        
+        # Scoped sensitivity preset buttons
+        self.scoped_sens_buttons = {}
+        scoped_presets = [20.0, 30.0, 40.0, 50.0, 60.0, 80.0]
+        for preset_val in scoped_presets:
+            btn = tk.Button(
+                self.scoped_sens_row,
+                text=f"{preset_val:.1f}%",
+                command=lambda v=preset_val: self.set_scoped_preset(v),
+                font=("Arial", 10),
+                bg="#444444",
+                fg="white",
+                width=6,
+                height=1,
+                relief=tk.FLAT
+            )
+            btn.pack(side=tk.LEFT, padx=2)
+            self.scoped_sens_buttons[preset_val] = btn
+        
+        # Scoped hint label
+        self.scoped_hint_label = tk.Label(
+            self.scoped_sens_row,
+            text="(Hold Right-Click)",
+            font=("Arial", 9),
+            bg="#1a1a1a",
+            fg="#666666"
+        )
+        self.scoped_hint_label.pack(side=tk.LEFT, padx=(10, 0))
         
         # We no longer need the separate y_sens_frame
         self.y_sens_frame = None
@@ -575,6 +658,10 @@ class AimExercise:
         )
         self.canvas.bind("<Button-1>", self.on_shoot)
         
+        # Bind right-click for scoped sensitivity
+        self.canvas.bind("<Button-3>", self.on_scope_press)
+        self.canvas.bind("<ButtonRelease-3>", self.on_scope_release)
+        
         # Don't pack canvas yet - it will be packed when mode is selected
         
         # Bind focus events to handle tabbing out
@@ -590,6 +677,27 @@ class AimExercise:
         
         # Apply initial sensitivity from entry field values
         self.apply_custom_sensitivity()
+    
+    def set_scoped_preset(self, value):
+        """Set scoped sensitivity to a preset value"""
+        self.scoped_sens_percent = float(value)
+        self.scoped_sens_var.set(f"{value:.1f}")
+        
+        # Update button highlighting
+        for preset_val, btn in self.scoped_sens_buttons.items():
+            if preset_val == value:
+                btn.config(bg="#00aa00")
+            else:
+                btn.config(bg="#444444")
+    
+    def on_scope_press(self, event):
+        """Handle right-click press - activate scoped sensitivity"""
+        if self.is_active and self.mouse_locked:
+            self.scoped_active = True
+    
+    def on_scope_release(self, event):
+        """Handle right-click release - deactivate scoped sensitivity"""
+        self.scoped_active = False
     
     def set_crosshair_style(self, style_num):
         """Set the crosshair style"""
@@ -616,6 +724,10 @@ class AimExercise:
         color = self.crosshair_color
         outline_color = self.crosshair_outline_color
         has_outline = style['outline']
+        
+        # Change crosshair color when scoped
+        if self.scoped_active:
+            color = "#ff9900"  # Orange when scoped
         
         if style['type'] == 'cross':
             # Draw cross crosshair
@@ -737,7 +849,7 @@ class AimExercise:
         try:
             x_val = float(self.x_sens_var.get())
         except ValueError:
-            x_val = 5.1
+            x_val = 5.0
         
         y_option = self.y_sens_options[option_num]
         if y_option['offset'] is None:
@@ -838,9 +950,11 @@ class AimExercise:
         
         # Apply current sensitivity from entry fields before starting
         self.apply_custom_sensitivity()
+        self.apply_scoped_sensitivity()
             
         self.is_active = True
         self.mouse_locked = True
+        self.scoped_active = False  # Reset scoped state
         self.start_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
         
@@ -924,8 +1038,6 @@ class AimExercise:
             self.debug_analysis_points = []  # Points in the analysis window
             self.debug_reversal_points = []  # Where reversals were detected
             self.debug_pause_points = []  # Where pauses were detected
-            self.debug_x_undershoot_points = []  # X axis undershoots
-            self.debug_y_undershoot_points = []  # Y axis undershoots
             self.spawn_debug_target()
             # Bind space to spawn new target
             self.root.bind("<space>", lambda e: self.spawn_debug_target() if (self.is_active and self.game_mode == 'debug') else None)
@@ -936,6 +1048,7 @@ class AimExercise:
         """Stop the aim exercise"""
         self.is_active = False
         self.mouse_locked = False
+        self.scoped_active = False  # Reset scoped state
         self.start_btn.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.DISABLED)
         
@@ -990,9 +1103,15 @@ class AimExercise:
                 delta_x = current_x - self.last_mouse_x
                 delta_y = current_y - self.last_mouse_y
                 
+                # Apply scoped sensitivity multiplier if active
+                sens_multiplier = 1.0
+                if self.scoped_active:
+                    sens_multiplier = self.scoped_sens_percent / 100.0
+                
                 # Update camera angles with separate horizontal/vertical sensitivity
-                self.yaw += delta_x / self.h_counts_per_degree
-                self.pitch -= delta_y / self.v_counts_per_degree
+                # Apply scoped multiplier to both axes
+                self.yaw += (delta_x / self.h_counts_per_degree) * sens_multiplier
+                self.pitch -= (delta_y / self.v_counts_per_degree) * sens_multiplier
                 
                 # Clamp pitch to screen bounds (small range)
                 max_pitch = (self.canvas_height / 2) / self.pixels_per_degree * 0.5
@@ -1753,8 +1872,11 @@ class AimExercise:
                 if parts:
                     last_shot_text = "Markers: " + " | ".join(parts)
             
-            # Show current sensitivity (X and Y)
-            stats_text += f" | X: {self.current_x_sens:.1f}% Y: {self.current_y_sens:.1f}%"
+            # Show current sensitivity (X and Y) and scoped status
+            sens_display = f" | X: {self.current_x_sens:.1f}% Y: {self.current_y_sens:.1f}%"
+            if self.scoped_active:
+                sens_display += f" | SCOPED ({self.scoped_sens_percent:.1f}%)"
+            stats_text += sens_display
             
             # Add message if mouse is unlocked
             if not self.mouse_locked and self.mouse_was_locked:
@@ -1801,6 +1923,17 @@ class AimExercise:
                     font=("Arial", 12),
                     fill="#66ffff",  # Cyan for debug info
                     tags="stats"
+                )
+            
+            # Draw scoped indicator if active
+            if self.scoped_active:
+                self.canvas.create_text(
+                    center_x,
+                    self.canvas_height - 40,
+                    text=f"⊕ SCOPED ({self.scoped_sens_percent:.1f}%)",
+                    font=("Arial", 18, "bold"),
+                    fill="#ff9900",
+                    tags="scoped_indicator"
                 )
         
         # Debug mode only: Draw full path visualization
@@ -2476,6 +2609,7 @@ class AimExercise:
             # Temporarily unlock mouse when window loses focus
             self.mouse_locked = False
             self.mouse_was_locked = True  # Remember it was locked
+            self.scoped_active = False  # Release scope when losing focus
             
     def on_focus_gained(self, event):
         """Handle window gaining focus (tabbing back in)"""
@@ -2511,3 +2645,4 @@ class AimExercise:
         """Cleanup resources"""
         self.mouse_locked = False
         self.is_active = False
+        self.scoped_active = False
