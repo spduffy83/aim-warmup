@@ -61,7 +61,7 @@ class AimExercise:
         self.fn_sens_constant = 164.6
         
         # Current sensitivity values (will be set properly after UI creation)
-        self.current_x_sens = 5.1
+        self.current_x_sens = 5.3
         self.current_y_sens = 7.2  # Default Y sensitivity
         
         # Virtual camera yaw/pitch (in degrees)
@@ -184,7 +184,7 @@ class AimExercise:
             try:
                 x_fn_sens = float(self.x_sens_var.get())
             except (ValueError, AttributeError):
-                x_fn_sens = 5.1  # Default
+                x_fn_sens = 5.3  # Default
         
         if y_fn_sens is None:
             try:
@@ -223,8 +223,8 @@ class AimExercise:
             x_val = round(x_val, 1)
             self.x_sens_var.set(f"{x_val:.1f}")
         except ValueError:
-            x_val = 5.1
-            self.x_sens_var.set("5.1")
+            x_val = 5.3
+            self.x_sens_var.set("5.3")
         
         try:
             y_val = float(self.y_sens_var.get())
@@ -441,7 +441,7 @@ class AimExercise:
         self.sens_label.pack(side=tk.LEFT, padx=(0, 10))
         
         # X sensitivity numeric entry
-        self.x_sens_var = tk.StringVar(value="5.1")
+        self.x_sens_var = tk.StringVar(value="5.3")
         self.x_sens_entry = tk.Entry(
             self.x_sens_row,
             textvariable=self.x_sens_var,
@@ -849,7 +849,7 @@ class AimExercise:
         try:
             x_val = float(self.x_sens_var.get())
         except ValueError:
-            x_val = 5.1
+            x_val = 5.3
         
         y_option = self.y_sens_options[option_num]
         if y_option['offset'] is None:
