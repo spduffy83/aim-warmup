@@ -2,6 +2,7 @@ import tkinter as tk
 import random
 import time
 import math
+from collections import deque
 from pynput.mouse import Controller as MouseController
 
 # Try to import pygame for sound effects
@@ -73,15 +74,25 @@ class AimExercise:
         self.num_targets = 3  # Number of simultaneous targets
         
         # Game mode
-        self.game_mode = None  # Will be 'random' or 'tracking'
+        self.game_mode = None  # Will be 'random' or 'debug'
         
-        # Tracking mode variables
-        self.tracking_targets = []  # List of tracking target objects
-        self.tracking_score = 0
-        self.tracking_time_on_target = 0.0
-        self.tracking_total_time = 0.0
-        self.tracking_start_time = 0
-        self.tracking_duration = 60  # 60 second rounds
+        # Streak tracking
+        self.current_streak = 0
+        self.best_streak = 0
+        self.streak_history = []  # Last 3 completed streaks (resets each session)
+        
+        # Rolling 30-second metrics
+        self.rolling_window = 30.0  # seconds
+        self.recent_hits = deque()  # (timestamp, reaction_time) tuples
+        self.recent_misses = deque()  # timestamp entries
+        self.recent_path_efficiencies = deque()  # (timestamp, efficiency) tuples
+        self.recent_x_efficiencies = deque()  # (timestamp, efficiency) tuples
+        self.recent_y_efficiencies = deque()  # (timestamp, efficiency) tuples
+        self.recent_precisions = deque()  # (timestamp, precision) tuples
+        self.recent_x_overshoots = deque()  # (timestamp, 0 or 1) tuples
+        self.recent_y_overshoots = deque()  # (timestamp, 0 or 1) tuples
+        self.recent_x_undershoots = deque()  # (timestamp, 0 or 1) tuples
+        self.recent_y_undershoots = deque()  # (timestamp, 0 or 1) tuples
         
         # Session timer (counts up while active and focused)
         self.session_timer = 0.0  # Total elapsed time in seconds
@@ -89,6 +100,10 @@ class AimExercise:
         
         # Track if mouse was locked before losing focus
         self.mouse_was_locked = False
+        
+        # Focus tracking for pausing targets
+        self.focus_lost_time = 0  # When focus was lost
+        self.total_unfocused_time = 0  # Accumulated unfocused time since session start
         
         # Crosshair trail for tracking visualization
         self.trail_points = []  # List of (yaw, pitch, timestamp)
@@ -294,16 +309,6 @@ class AimExercise:
         miss_wave = np.sin(2 * np.pi * freq * t) * np.exp(-t * 10) * 0.3
         self.sounds['miss'] = make_sound_from_wave(miss_wave)
         self.sounds['miss'].set_volume(0.3)
-        
-        # Tracking target destroyed - rising triumphant sound
-        duration = 0.25
-        t = np.linspace(0, duration, int(sample_rate * duration), False)
-        freq = 500 + 300 * t / duration  # Rising from 500 to 800 Hz
-        destroy_wave = (np.sin(2 * np.pi * freq * t) + 
-                        0.4 * np.sin(2 * np.pi * freq * 1.5 * t))
-        destroy_wave = destroy_wave * np.exp(-t * 8) * 0.3
-        self.sounds['destroy'] = make_sound_from_wave(destroy_wave)
-        self.sounds['destroy'].set_volume(0.3)
     
     def play_sound(self, sound_name):
         """Play a sound effect (only when game has focus)"""
@@ -339,20 +344,6 @@ class AimExercise:
             relief=tk.FLAT
         )
         self.random_mode_btn.pack(side=tk.LEFT, padx=15)
-        
-        # Tracking practice mode button
-        self.tracking_mode_btn = tk.Button(
-            self.mode_frame,
-            text="TRACKING PRACTICE\n\nDestroy moving targets\nKeep crosshair on target to damage",
-            command=lambda: self.select_mode('tracking'),
-            font=("Arial", 14, "bold"),
-            bg="#00aa66",
-            fg="white",
-            width=25,
-            height=5,
-            relief=tk.FLAT
-        )
-        self.tracking_mode_btn.pack(side=tk.LEFT, padx=15)
         
         # Debug test mode button
         self.debug_mode_btn = tk.Button(
@@ -881,9 +872,6 @@ class AimExercise:
         if mode == 'random':
             self.title.config(text="Random Targets Mode", font=("Arial", 20, "bold"))
             self.stats_label.config(text="Press START to begin | M for menu | ESC to exit")
-        elif mode == 'tracking':
-            self.title.config(text="Tracking Practice Mode", font=("Arial", 20, "bold"))
-            self.stats_label.config(text="Keep crosshair on targets to destroy | M for menu | ESC to exit")
         elif mode == 'debug':
             self.title.config(text="Debug Test Mode", font=("Arial", 20, "bold"))
             self.stats_label.config(text="Single target | Path visualization | SPACE to spawn new target | M for menu")
@@ -986,6 +974,23 @@ class AimExercise:
         self.has_last_hit = False
         self.hit_precisions = []  # Reset hit precision tracking
         
+        # Reset streak
+        self.current_streak = 0
+        self.best_streak = 0
+        self.streak_history = []  # Reset last 3 streaks at session start
+        
+        # Reset rolling metrics
+        self.recent_hits.clear()
+        self.recent_misses.clear()
+        self.recent_path_efficiencies.clear()
+        self.recent_x_efficiencies.clear()
+        self.recent_y_efficiencies.clear()
+        self.recent_precisions.clear()
+        self.recent_x_overshoots.clear()
+        self.recent_y_overshoots.clear()
+        self.recent_x_undershoots.clear()
+        self.recent_y_undershoots.clear()
+        
         # Reset approach analysis tracking
         self.x_overshoots = []
         self.y_overshoots = []
@@ -1004,9 +1009,11 @@ class AimExercise:
         self.debug_reversal_points = []
         self.debug_analysis_points = []
         
-        # Reset session timer
+        # Reset session timer and focus tracking
         self.session_timer = 0.0
         self.last_timer_update = time.time()
+        self.total_unfocused_time = 0
+        self.focus_lost_time = 0
         
         # Store last mouse position for delta calculation
         pos = self.mouse.position
@@ -1024,13 +1031,6 @@ class AimExercise:
             self.has_last_hit = True
             self.last_hit_yaw = self.yaw
             self.last_hit_pitch = self.pitch
-        elif self.game_mode == 'tracking':
-            self.tracking_start_time = time.time()
-            self.tracking_time_on_target = 0.0
-            self.tracking_total_time = 0.0
-            self.tracking_targets = []
-            self.spawn_tracking_target()
-            self.spawn_tracking_target()  # Start with 2 targets
         elif self.game_mode == 'debug':
             # Debug mode: single target, no expiration
             self.debug_frozen = False  # Whether we're frozen showing results
@@ -1081,6 +1081,18 @@ class AimExercise:
         self.y_overshoots = []
         self.x_micro_adjustments = []
         self.y_micro_adjustments = []
+        self.current_streak = 0
+        self.best_streak = 0
+        self.recent_hits.clear()
+        self.recent_misses.clear()
+        self.recent_path_efficiencies.clear()
+        self.recent_x_efficiencies.clear()
+        self.recent_y_efficiencies.clear()
+        self.recent_precisions.clear()
+        self.recent_x_overshoots.clear()
+        self.recent_y_overshoots.clear()
+        self.recent_x_undershoots.clear()
+        self.recent_y_undershoots.clear()
         self.update_stats_display()
         
     def lock_mouse_loop(self):
@@ -1138,12 +1150,6 @@ class AimExercise:
             
             # Always redraw the scene (even when unlocked)
             self.draw_scene()
-            
-            # Update tracking targets if in tracking mode
-            if self.game_mode == 'tracking' and self.mouse_locked:
-                current_time = time.time()
-                delta_time = 0.016  # Approximately 60fps
-                self.update_tracking_targets(delta_time)
             
             # Schedule next check
             self.root.after(1, self.lock_mouse_loop)
@@ -1510,100 +1516,89 @@ class AimExercise:
         y_avg = sum(self.y_micro_adjustments) / len(self.y_micro_adjustments) if self.y_micro_adjustments else 0.0
         return x_avg, y_avg
     
-    def spawn_tracking_target(self):
-        """Spawn a moving target for tracking mode"""
-        if not self.is_active:
-            return
+    def prune_rolling_metrics(self, current_time):
+        """Remove entries older than rolling_window from recent metrics"""
+        cutoff = current_time - self.rolling_window
         
-        # Calculate world bounds (same as random mode)
-        max_pitch = (self.canvas_height / 2) / self.pixels_per_degree * 0.5
-        max_yaw = (self.canvas_width / 2) / self.pixels_per_degree * 0.5
-        
-        # Spawn within bounded world space (with margin)
-        margin = 0.7
-        target_yaw = random.uniform(-max_yaw * margin, max_yaw * margin)
-        target_pitch = random.uniform(-max_pitch * margin, max_pitch * margin)
-        
-        # Random velocity
-        speed = random.uniform(1.5, 3.0)  # Degrees per second
-        angle = random.uniform(0, 2 * math.pi)
-        vel_yaw = math.cos(angle) * speed
-        vel_pitch = math.sin(angle) * speed * 0.5  # Less vertical movement
-        
-        # Target properties - same size as random targets, health takes ~3 seconds to deplete
-        target = {
-            'yaw': target_yaw,
-            'pitch': target_pitch,
-            'vel_yaw': vel_yaw,
-            'vel_pitch': vel_pitch,
-            'max_health': 300.0,
-            'health': 300.0,
-            'size': self.target_size  # Same as random targets (35)
-        }
-        
-        self.tracking_targets.append(target)
+        while self.recent_hits and self.recent_hits[0][0] < cutoff:
+            self.recent_hits.popleft()
+        while self.recent_misses and self.recent_misses[0] < cutoff:
+            self.recent_misses.popleft()
+        while self.recent_path_efficiencies and self.recent_path_efficiencies[0][0] < cutoff:
+            self.recent_path_efficiencies.popleft()
+        while self.recent_x_efficiencies and self.recent_x_efficiencies[0][0] < cutoff:
+            self.recent_x_efficiencies.popleft()
+        while self.recent_y_efficiencies and self.recent_y_efficiencies[0][0] < cutoff:
+            self.recent_y_efficiencies.popleft()
+        while self.recent_precisions and self.recent_precisions[0][0] < cutoff:
+            self.recent_precisions.popleft()
+        while self.recent_x_overshoots and self.recent_x_overshoots[0][0] < cutoff:
+            self.recent_x_overshoots.popleft()
+        while self.recent_y_overshoots and self.recent_y_overshoots[0][0] < cutoff:
+            self.recent_y_overshoots.popleft()
+        while self.recent_x_undershoots and self.recent_x_undershoots[0][0] < cutoff:
+            self.recent_x_undershoots.popleft()
+        while self.recent_y_undershoots and self.recent_y_undershoots[0][0] < cutoff:
+            self.recent_y_undershoots.popleft()
     
-    def update_tracking_targets(self, delta_time):
-        """Update tracking target positions and check for crosshair overlap"""
-        targets_to_remove = []
-        
-        # Calculate world bounds (same as random mode)
-        max_pitch = (self.canvas_height / 2) / self.pixels_per_degree * 0.5
-        max_yaw = (self.canvas_width / 2) / self.pixels_per_degree * 0.5
-        
-        for target in self.tracking_targets:
-            # Update position based on velocity
-            target['yaw'] += target['vel_yaw'] * delta_time
-            target['pitch'] += target['vel_pitch'] * delta_time
-            
-            # Bounce off world bounds (fixed coordinates)
-            margin = 0.85
-            if abs(target['yaw']) > max_yaw * margin:
-                target['vel_yaw'] *= -1
-                target['yaw'] = max(-max_yaw * margin, min(max_yaw * margin, target['yaw']))
-            
-            if abs(target['pitch']) > max_pitch * margin:
-                target['vel_pitch'] *= -1
-                target['pitch'] = max(-max_pitch * margin, min(max_pitch * margin, target['pitch']))
-            
-            # Check if crosshair is on target (SQUARE hitbox, same as random mode)
-            yaw_diff = target['yaw'] - self.yaw
-            while yaw_diff > 180:
-                yaw_diff -= 360
-            while yaw_diff < -180:
-                yaw_diff += 360
-            pitch_diff = target['pitch'] - self.pitch
-            
-            target_angular_size = target['size'] / self.pixels_per_degree
-            
-            # Square hitbox check
-            if abs(yaw_diff) <= target_angular_size and abs(pitch_diff) <= target_angular_size:
-                # Crosshair is on target - degrade health
-                damage_rate = 100.0  # Health per second while on target (~3 sec to destroy)
-                target['health'] -= damage_rate * delta_time
-                self.tracking_time_on_target += delta_time
-                
-                if target['health'] <= 0:
-                    targets_to_remove.append(target)
-            
-            # Randomly change direction occasionally
-            if random.random() < 0.002:  # 0.2% chance per frame
-                speed = math.sqrt(target['vel_yaw']**2 + target['vel_pitch']**2)
-                angle = random.uniform(0, 2 * math.pi)
-                target['vel_yaw'] = math.cos(angle) * speed
-                target['vel_pitch'] = math.sin(angle) * speed * 0.5
-        
-        # Remove destroyed targets and spawn new ones
-        for target in targets_to_remove:
-            self.play_sound('destroy')
-            self.tracking_targets.remove(target)
-            self.spawn_tracking_target()
-        
-        self.tracking_total_time += delta_time
-            
+    def get_rolling_accuracy(self, current_time):
+        """Get accuracy for the last rolling_window seconds"""
+        self.prune_rolling_metrics(current_time)
+        total = len(self.recent_hits) + len(self.recent_misses)
+        if total == 0:
+            return 0.0
+        return (len(self.recent_hits) / total) * 100
+    
+    def get_rolling_avg_reaction_time(self, current_time):
+        """Get average reaction time for the last rolling_window seconds"""
+        self.prune_rolling_metrics(current_time)
+        if not self.recent_hits:
+            return 0.0
+        return sum(rt for _, rt in self.recent_hits) / len(self.recent_hits)
+    
+    def get_rolling_path_efficiency(self, current_time):
+        """Get average path efficiency for the last rolling_window seconds"""
+        self.prune_rolling_metrics(current_time)
+        if not self.recent_path_efficiencies:
+            return 0.0
+        return sum(eff for _, eff in self.recent_path_efficiencies) / len(self.recent_path_efficiencies)
+    
+    def get_rolling_precision(self, current_time):
+        """Get average precision for the last rolling_window seconds"""
+        self.prune_rolling_metrics(current_time)
+        if not self.recent_precisions:
+            return 0.0
+        return sum(p for _, p in self.recent_precisions) / len(self.recent_precisions)
+    
+    def get_rolling_overshoot_percentages(self, current_time):
+        """Get overshoot percentages for the last rolling_window seconds"""
+        self.prune_rolling_metrics(current_time)
+        x_pct = 0.0
+        y_pct = 0.0
+        if self.recent_x_overshoots:
+            x_pct = (sum(v for _, v in self.recent_x_overshoots) / len(self.recent_x_overshoots)) * 100
+        if self.recent_y_overshoots:
+            y_pct = (sum(v for _, v in self.recent_y_overshoots) / len(self.recent_y_overshoots)) * 100
+        return x_pct, y_pct
+    
+    def get_rolling_undershoot_percentages(self, current_time):
+        """Get undershoot percentages for the last rolling_window seconds"""
+        self.prune_rolling_metrics(current_time)
+        x_pct = 0.0
+        y_pct = 0.0
+        if self.recent_x_undershoots:
+            x_pct = (sum(v for _, v in self.recent_x_undershoots) / len(self.recent_x_undershoots)) * 100
+        if self.recent_y_undershoots:
+            y_pct = (sum(v for _, v in self.recent_y_undershoots) / len(self.recent_y_undershoots)) * 100
+        return x_pct, y_pct
+    
     def spawn_target_at_random_position(self):
         """Spawn a new purple target at random position within world bounds"""
         if not self.is_active:
+            return
+        
+        # Don't spawn targets when window is not focused
+        if not self.mouse_locked:
             return
         
         # Calculate world bounds (same as camera clamp)
@@ -1618,7 +1613,8 @@ class AimExercise:
         self.targets.append({
             'yaw': target_yaw,
             'pitch': target_pitch,
-            'spawn_time': time.time()
+            'spawn_time': time.time(),
+            'paused_duration': 0.0  # Track time paused due to unfocus
         })
     
     def find_closest_target(self):
@@ -1656,10 +1652,16 @@ class AimExercise:
         """Get the current size of a target (constant, no shrinking)"""
         return self.target_size
     
+    def get_target_effective_age(self, target):
+        """Get the effective age of a target, accounting for paused time"""
+        current_time = time.time()
+        raw_age = current_time - target['spawn_time']
+        # Subtract paused duration to get effective age
+        return raw_age - target.get('paused_duration', 0.0)
+    
     def get_target_color(self, target):
         """Get the current color of a target based on its age (purple to blue over lifetime)"""
-        current_time = time.time()
-        target_age = current_time - target['spawn_time']
+        target_age = self.get_target_effective_age(target)
         
         # Interpolate from purple (#9933ff) to blue (#3366ff) over lifetime
         age_ratio = min(target_age / self.target_lifetime, 1.0)
@@ -1767,14 +1769,34 @@ class AimExercise:
                 tags="timer"
             )
             
+            # Draw last 3 streak tallies below timer (top right) - only in random mode
             if self.game_mode == 'random':
-                # First line: basic stats
+                # Format streak history, showing oldest to newest (left to right)
+                streak_display = []
+                for i in range(3):
+                    idx = len(self.streak_history) - 3 + i
+                    if idx >= 0 and idx < len(self.streak_history):
+                        streak_display.append(str(self.streak_history[idx]))
+                    else:
+                        streak_display.append("-")
+                streak_history_text = f"Last 3: {streak_display[0]} | {streak_display[1]} | {streak_display[2]}"
+                self.canvas.create_text(
+                    self.canvas_width - 80,
+                    55,
+                    text=streak_history_text,
+                    font=("Arial", 12),
+                    fill="#aaaaaa",
+                    tags="streak_history"
+                )
+                
+                # First line: basic stats with streak
                 stats_text = f"Hits: {self.stats.hits} | Misses: {self.stats.misses} | Accuracy: {accuracy:.1f}%"
                 if avg_time > 0:
-                    stats_text += f" | Avg Time: {avg_time:.3f}s"
+                    stats_text += f" | Avg: {avg_time:.3f}s"
+                stats_text += f" | Streak: {self.current_streak} (Best: {self.best_streak})"
                 avg_precision = self.get_average_hit_precision()
                 if avg_precision > 0:
-                    stats_text += f" | Precision: {avg_precision:.1f}%"
+                    stats_text += f" | Prec: {avg_precision:.1f}%"
                 
                 # Second line: path efficiency breakdown
                 avg_efficiency = self.get_average_path_efficiency()
@@ -1789,7 +1811,21 @@ class AimExercise:
                 if avg_y_eff > 0:
                     efficiency_text += f" | Y: {avg_y_eff:.1f}%"
                 
-                # Third line: approach analysis (overshoot/undershoot from last shot)
+                # Third line: 30-second rolling metrics
+                rolling_acc = self.get_rolling_accuracy(current_time)
+                rolling_rt = self.get_rolling_avg_reaction_time(current_time)
+                rolling_eff = self.get_rolling_path_efficiency(current_time)
+                rolling_prec = self.get_rolling_precision(current_time)
+                
+                rolling_text = f"[30s] Acc: {rolling_acc:.1f}%"
+                if rolling_rt > 0:
+                    rolling_text += f" | Avg: {rolling_rt:.3f}s"
+                if rolling_eff > 0:
+                    rolling_text += f" | Path: {rolling_eff:.1f}%"
+                if rolling_prec > 0:
+                    rolling_text += f" | Prec: {rolling_prec:.1f}%"
+                
+                # Fourth line: approach analysis (overshoot/undershoot from last shot)
                 approach_text = ""
                 if self.last_shot_analysis:
                     data = self.last_shot_analysis
@@ -1808,7 +1844,7 @@ class AimExercise:
                             under_parts.append("Y")
                         approach_text += f" | UNDER: {'+'.join(under_parts)}"
                 
-                # Fourth line: percentages for overs and unders
+                # Fifth line: percentages for overs and unders (session totals)
                 last_shot_text = ""
                 total_samples = len(self.x_overshoots)
                 if total_samples > 0:
@@ -1824,21 +1860,22 @@ class AimExercise:
                     x_under_pct = (x_under_count / total_samples) * 100
                     y_under_pct = (y_under_count / total_samples) * 100
                     
-                    last_shot_text = f"({total_samples}) OVER: X={x_over_pct:.0f}% Y={y_over_pct:.0f}% | UNDER: X={x_under_pct:.0f}% Y={y_under_pct:.0f}%"
+                    last_shot_text = f"Session({total_samples}): OVER X={x_over_pct:.0f}% Y={y_over_pct:.0f}% | UNDER X={x_under_pct:.0f}% Y={y_under_pct:.0f}%"
                 
-            elif self.game_mode == 'tracking':
-                tracking_accuracy = 0
-                if self.tracking_total_time > 0:
-                    tracking_accuracy = (self.tracking_time_on_target / self.tracking_total_time) * 100
-                stats_text = f"Tracking Accuracy: {tracking_accuracy:.1f}% | On Target: {self.tracking_time_on_target:.1f}s"
-                efficiency_text = ""
-                approach_text = ""
-                last_shot_text = ""
-            
+                # Sixth line: 30-second rolling overshoot/undershoot
+                rolling_over_under_text = ""
+                rolling_x_over, rolling_y_over = self.get_rolling_overshoot_percentages(current_time)
+                rolling_x_under, rolling_y_under = self.get_rolling_undershoot_percentages(current_time)
+                rolling_samples = len(self.recent_x_overshoots)
+                if rolling_samples > 0:
+                    rolling_over_under_text = f"[30s]({rolling_samples}): OVER X={rolling_x_over:.0f}% Y={rolling_y_over:.0f}% | UNDER X={rolling_x_under:.0f}% Y={rolling_y_under:.0f}%"
+                
             elif self.game_mode == 'debug':
                 # Debug mode display
                 stats_text = f"DEBUG MODE | Hits: {self.stats.hits} | Misses: {self.stats.misses} | SPACE = new target"
                 efficiency_text = f"Path points: {len(self.path_points)} | Analysis window: last {int(self.approach_analysis_window * 100)}%"
+                rolling_text = ""
+                rolling_over_under_text = ""  # Not used in debug mode
                 
                 # Detailed approach info - show both over and under
                 approach_text = ""
@@ -1903,25 +1940,49 @@ class AimExercise:
                     tags="stats"
                 )
             
-            # Draw third line (approach analysis) if we have data
-            if (self.game_mode == 'random' or self.game_mode == 'debug') and approach_text:
+            # Draw third line (rolling 30s metrics) if in random mode
+            if self.game_mode == 'random' and rolling_text:
                 self.canvas.create_text(
                     center_x,
                     80,
+                    text=rolling_text,
+                    font=("Arial", 13),
+                    fill="#00ccff",  # Cyan for rolling metrics
+                    tags="stats"
+                )
+            
+            # Draw fourth line (approach analysis) if we have data
+            if (self.game_mode == 'random' or self.game_mode == 'debug') and approach_text:
+                y_pos = 105 if self.game_mode == 'random' else 80
+                self.canvas.create_text(
+                    center_x,
+                    y_pos,
                     text=approach_text,
                     font=("Arial", 13),
                     fill="#ff6666",  # Light red for approach analysis
                     tags="stats"
                 )
             
-            # Draw fourth line (last shot details) if we have data
+            # Draw fifth line (last shot details) if we have data
             if (self.game_mode == 'random' or self.game_mode == 'debug') and last_shot_text:
+                y_pos = 130 if self.game_mode == 'random' else 105
                 self.canvas.create_text(
                     center_x,
-                    105,
+                    y_pos,
                     text=last_shot_text,
                     font=("Arial", 12),
                     fill="#66ffff",  # Cyan for debug info
+                    tags="stats"
+                )
+            
+            # Draw sixth line (30-second rolling over/under) if we have data
+            if self.game_mode == 'random' and rolling_over_under_text:
+                self.canvas.create_text(
+                    center_x,
+                    155,
+                    text=rolling_over_under_text,
+                    font=("Arial", 12),
+                    fill="#ffff66",  # Yellow for rolling over/under
                     tags="stats"
                 )
             
@@ -2036,13 +2097,23 @@ class AimExercise:
             for target in self.targets:
                 target_yaw = target['yaw']
                 target_pitch = target['pitch']
-                target_age = current_time - target['spawn_time']
+                target_age = self.get_target_effective_age(target)
                 
-                # Check if target expired
-                if target_age >= self.target_lifetime:
+                # Only check expiration when focused (mouse_locked)
+                if self.mouse_locked and target_age >= self.target_lifetime:
                     targets_to_remove.append(target)
                     self.stats.record_miss()
                     self.play_sound('miss')
+                    # Record completed streak to history before resetting
+                    if self.current_streak > 0:
+                        self.streak_history.append(self.current_streak)
+                        # Keep only last 3 streaks
+                        if len(self.streak_history) > 3:
+                            self.streak_history.pop(0)
+                    # Reset streak on target expiration
+                    self.current_streak = 0
+                    # Record miss for rolling metrics
+                    self.recent_misses.append(current_time)
                     continue
                 
                 # Calculate current size
@@ -2091,98 +2162,13 @@ class AimExercise:
                         tags="target"
                     )
             
-            # Remove expired targets and spawn replacements
+            # Remove expired targets and spawn replacements (only when focused)
             for target in targets_to_remove:
                 self.targets.remove(target)
-                self.spawn_target_at_random_position()
+                if self.mouse_locked:
+                    self.spawn_target_at_random_position()
                 # Reset path for next target
                 self.path_points = [(self.yaw, self.pitch)]
-        
-        # Draw tracking targets
-        if self.game_mode == 'tracking':
-            for target in self.tracking_targets:
-                yaw_diff = target['yaw'] - self.yaw
-                pitch_diff = target['pitch'] - self.pitch
-                
-                while yaw_diff > 180:
-                    yaw_diff -= 360
-                while yaw_diff < -180:
-                    yaw_diff += 360
-                
-                target_screen_x = center_x + (yaw_diff * self.pixels_per_degree)
-                target_screen_y = center_y - (pitch_diff * self.pixels_per_degree)
-                
-                current_size = target['size']
-                
-                # Only draw if on screen
-                margin = current_size + 10
-                if (-margin <= target_screen_x <= self.canvas_width + margin and 
-                    -margin <= target_screen_y <= self.canvas_height + margin):
-                    
-                    # Calculate color based on health (green -> yellow -> red)
-                    health = target['health']
-                    max_health = target['max_health']
-                    health_ratio = health / max_health
-                    
-                    if health_ratio > 0.5:
-                        # Green to yellow
-                        ratio = (health_ratio - 0.5) / 0.5
-                        red = int(255 * (1 - ratio))
-                        green = 255
-                    else:
-                        # Yellow to red
-                        ratio = health_ratio / 0.5
-                        red = 255
-                        green = int(255 * ratio)
-                    target_color = f'#{red:02x}{green:02x}00'
-                    
-                    # Draw SQUARE target (same style as random mode)
-                    self.canvas.create_rectangle(
-                        target_screen_x - current_size,
-                        target_screen_y - current_size,
-                        target_screen_x + current_size,
-                        target_screen_y + current_size,
-                        fill=target_color,
-                        outline="#ffffff",
-                        width=3,
-                        tags="tracking_target"
-                    )
-                    
-                    # Draw target center dot
-                    self.canvas.create_oval(
-                        target_screen_x - 3,
-                        target_screen_y - 3,
-                        target_screen_x + 3,
-                        target_screen_y + 3,
-                        fill="#ffffff",
-                        tags="tracking_target"
-                    )
-                    
-                    # Draw health bar above target
-                    bar_width = 50
-                    bar_height = 6
-                    bar_x = target_screen_x - bar_width / 2
-                    bar_y = target_screen_y - current_size - 15
-                    
-                    # Background
-                    self.canvas.create_rectangle(
-                        bar_x, bar_y,
-                        bar_x + bar_width, bar_y + bar_height,
-                        fill="#333333",
-                        outline="#ffffff",
-                        tags="tracking_target"
-                    )
-                    
-                    # Health fill
-                    fill_width = health_ratio * bar_width
-                    if fill_width > 0:
-                        self.canvas.create_rectangle(
-                            bar_x, bar_y,
-                            bar_x + fill_width, bar_y + bar_height,
-                            fill=target_color,
-                            outline="",
-                            tags="tracking_target"
-                        )
         
         # Debug and Random mode: Draw OVER/UNDER markers on top of targets (with fade effect)
         if self.game_mode in ('debug', 'random'):
@@ -2464,6 +2450,8 @@ class AimExercise:
     
     def handle_random_mode_shot(self):
         """Handle shooting in random targets mode - find closest target to crosshair"""
+        current_time = time.time()
+        
         # Find the closest target to crosshair position
         closest_target, closest_index, closest_distance = self.find_closest_target()
         
@@ -2496,34 +2484,53 @@ class AimExercise:
             efficiency = self.calculate_path_efficiency(target_yaw, target_pitch)
             if efficiency is not None:
                 self.path_efficiencies.append(efficiency)
+                self.recent_path_efficiencies.append((current_time, efficiency))
             
             # Calculate axis-specific efficiency
             x_eff, y_eff = self.calculate_axis_efficiency(target_yaw, target_pitch)
             if x_eff is not None:
                 self.x_efficiencies.append(x_eff)
+                self.recent_x_efficiencies.append((current_time, x_eff))
             if y_eff is not None:
                 self.y_efficiencies.append(y_eff)
+                self.recent_y_efficiencies.append((current_time, y_eff))
             
             # Analyze for overshoots (captures debug markers too)
             approach_data = self.analyze_final_approach(target_yaw, target_pitch, capture_debug=True)
             if approach_data:
                 # Record 1 if overshoot occurred (max_overshoot > 0), 0 otherwise
-                self.x_overshoots.append(1 if approach_data['x_max_overshoot'] > 0 else 0)
-                self.y_overshoots.append(1 if approach_data['y_max_overshoot'] > 0 else 0)
+                x_over = 1 if approach_data['x_max_overshoot'] > 0 else 0
+                y_over = 1 if approach_data['y_max_overshoot'] > 0 else 0
+                self.x_overshoots.append(x_over)
+                self.y_overshoots.append(y_over)
+                self.recent_x_overshoots.append((current_time, x_over))
+                self.recent_y_overshoots.append((current_time, y_over))
                 self.last_shot_analysis = approach_data
             
             # Check for undershoots (shot position vs target edge)
             x_under, y_under = self.check_undershoot(target_yaw, target_pitch, capture_debug=True)
-            self.x_micro_adjustments.append(1 if x_under else 0)
-            self.y_micro_adjustments.append(1 if y_under else 0)
+            x_under_val = 1 if x_under else 0
+            y_under_val = 1 if y_under else 0
+            self.x_micro_adjustments.append(x_under_val)
+            self.y_micro_adjustments.append(y_under_val)
+            self.recent_x_undershoots.append((current_time, x_under_val))
+            self.recent_y_undershoots.append((current_time, y_under_val))
             
             self.last_shot_was_hit = hit
             self.last_shot_type = "HIT" if hit else "MISS"
         
         if hit:
             # HIT the target
-            reaction_time = time.time() - spawn_time
+            reaction_time = self.get_target_effective_age(closest_target)
             self.stats.record_hit(reaction_time)
+            
+            # Record for rolling metrics
+            self.recent_hits.append((current_time, reaction_time))
+            
+            # Update streak
+            self.current_streak += 1
+            if self.current_streak > self.best_streak:
+                self.best_streak = self.current_streak
             
             # Calculate hit precision (100% = center, 0% = edge)
             x_ratio = abs(yaw_diff) / target_angular_size if target_angular_size > 0 else 0
@@ -2531,6 +2538,7 @@ class AimExercise:
             max_ratio = max(x_ratio, y_ratio)
             precision = (1 - max_ratio) * 100
             self.hit_precisions.append(precision)
+            self.recent_precisions.append((current_time, precision))
             
             # Play hit sound
             self.play_sound('hit')
@@ -2544,6 +2552,16 @@ class AimExercise:
         else:
             # MISS - clicked but didn't hit the closest target
             self.stats.record_miss()
+            self.recent_misses.append(current_time)
+            
+            # Record completed streak to history before resetting
+            if self.current_streak > 0:
+                self.streak_history.append(self.current_streak)
+                # Keep only last 3 streaks
+                if len(self.streak_history) > 3:
+                    self.streak_history.pop(0)
+            # Reset streak on miss
+            self.current_streak = 0
             
             # Keep path - don't reset until a hit
         
@@ -2606,6 +2624,8 @@ class AimExercise:
     def on_focus_lost(self, event):
         """Handle window losing focus (tabbing out)"""
         if self.is_active:
+            # Record when focus was lost
+            self.focus_lost_time = time.time()
             # Temporarily unlock mouse when window loses focus
             self.mouse_locked = False
             self.mouse_was_locked = True  # Remember it was locked
@@ -2613,8 +2633,18 @@ class AimExercise:
             
     def on_focus_gained(self, event):
         """Handle window gaining focus (tabbing back in)"""
+        if self.is_active and self.focus_lost_time > 0:
+            # Calculate how long we were unfocused
+            unfocused_duration = time.time() - self.focus_lost_time
+            self.total_unfocused_time += unfocused_duration
+            
+            # Add the unfocused duration to each target's paused_duration
+            for target in self.targets:
+                if isinstance(target, dict):  # Random mode targets
+                    target['paused_duration'] = target.get('paused_duration', 0.0) + unfocused_duration
+            
+            self.focus_lost_time = 0
         # Don't auto-relock, let user click to reactivate
-        pass
             
     def update_stats_display(self):
         """Update the statistics display"""
@@ -2624,6 +2654,9 @@ class AimExercise:
         stats_text = f"Hits: {self.stats.hits} | Misses: {self.stats.misses} | Accuracy: {accuracy:.1f}%"
         if avg_time > 0:
             stats_text += f" | Avg Time: {avg_time:.3f}s"
+        
+        # Add streak info
+        stats_text += f" | Best Streak: {self.best_streak}"
         
         # Add efficiency breakdown
         avg_efficiency = self.get_average_path_efficiency()
