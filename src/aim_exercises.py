@@ -73,8 +73,8 @@ class AimExercise:
         self.targets = []
         self.num_targets = 3  # Number of simultaneous targets
         
-        # Game mode
-        self.game_mode = None  # Will be 'random' or 'debug'
+        # Game mode (only random targets mode exists)
+        self.game_mode = 'random'
         
         # Streak tracking
         self.current_streak = 0
@@ -126,13 +126,11 @@ class AimExercise:
         self.y_micro_adjustments = []  # List of Y micro-adjustment counts
         self.approach_analysis_window = 1.0  # Analyze entire path (100%)
         
-        # Last shot analysis (for debug display)
+        # Last shot analysis
         self.last_shot_type = ""  # "HIT" or "MISS"
         self.last_shot_analysis = None  # Last approach analysis result
-        
-        # Debug mode variables
-        self.debug_frozen = False
-        self.debug_freeze_time = 0
+
+        # Approach-analysis marker state (powers the on-screen over/under markers)
         self.debug_analysis_points = []
         self.debug_reversal_points = []
         self.debug_pause_points = []
@@ -320,46 +318,14 @@ class AimExercise:
         # Title
         self.title = tk.Label(
             self.root,
-            text="FPS Aim Trainer - Select Your Mode",
-            font=("Arial", 24, "bold"),
+            text="Random Targets Mode",
+            font=("Arial", 20, "bold"),
             bg="#1a1a1a",
             fg="#ffffff"
         )
         self.title.pack(pady=20)
-        
-        # Mode selection frame
-        self.mode_frame = tk.Frame(self.root, bg="#1a1a1a")
-        self.mode_frame.pack(pady=20)
-        
-        # Random targets mode button
-        self.random_mode_btn = tk.Button(
-            self.mode_frame,
-            text="RANDOM TARGETS\n\nClick targets before they expire\n2 active at once",
-            command=lambda: self.select_mode('random'),
-            font=("Arial", 14, "bold"),
-            bg="#0066cc",
-            fg="white",
-            width=25,
-            height=5,
-            relief=tk.FLAT
-        )
-        self.random_mode_btn.pack(side=tk.LEFT, padx=15)
-        
-        # Debug test mode button
-        self.debug_mode_btn = tk.Button(
-            self.mode_frame,
-            text="DEBUG TEST\n\nSingle target, visual path\nTest approach metrics",
-            command=lambda: self.select_mode('debug'),
-            font=("Arial", 14, "bold"),
-            bg="#aa5500",
-            fg="white",
-            width=25,
-            height=5,
-            relief=tk.FLAT
-        )
-        self.debug_mode_btn.pack(side=tk.LEFT, padx=15)
-        
-        # Control buttons (initially hidden)
+
+        # Control buttons
         self.button_frame = tk.Frame(self.root, bg="#1a1a1a")
         
         self.start_btn = tk.Button(
@@ -401,20 +367,7 @@ class AimExercise:
             relief=tk.FLAT
         )
         self.reset_btn.pack(side=tk.LEFT, padx=10)
-        
-        self.back_btn = tk.Button(
-            self.button_frame,
-            text="CHANGE MODE",
-            command=self.back_to_mode_select,
-            font=("Arial", 12),
-            bg="#555555",
-            fg="white",
-            width=12,
-            height=1,
-            relief=tk.FLAT
-        )
-        self.back_btn.pack(side=tk.LEFT, padx=10)
-        
+
         # Sensitivity controls frame (contains both X and Y)
         self.sens_frame = tk.Frame(self.root, bg="#1a1a1a")
         
@@ -631,12 +584,11 @@ class AimExercise:
         # Stats display
         self.stats_label = tk.Label(
             self.root,
-            text="Select a mode to begin",
+            text="Press START to begin | ESC to exit",
             font=("Arial", 14),
             bg="#1a1a1a",
             fg="#00ff00"
         )
-        self.stats_label.pack(pady=5)
         
         # Canvas for targets (will fill screen when game starts)
         self.canvas = tk.Canvas(
@@ -652,17 +604,19 @@ class AimExercise:
         # Bind right-click for scoped sensitivity
         self.canvas.bind("<Button-3>", self.on_scope_press)
         self.canvas.bind("<ButtonRelease-3>", self.on_scope_release)
-        
-        # Don't pack canvas yet - it will be packed when mode is selected
-        
+
         # Bind focus events to handle tabbing out
         self.root.bind("<FocusOut>", self.on_focus_lost)
         self.root.bind("<FocusIn>", self.on_focus_gained)
-        
-        # Bind M key to return to mode selection
-        self.root.bind("<m>", lambda e: self.back_to_mode_select())
-        self.root.bind("<M>", lambda e: self.back_to_mode_select())
-        
+
+        # Show the control widgets directly (only one mode exists, so there is
+        # no mode-select screen to gate them behind)
+        self.button_frame.pack(pady=10)
+        self.sens_frame.pack(pady=5)
+        self.crosshair_frame.pack(pady=5)
+        self.stats_label.pack(pady=5)
+        self.canvas.pack(pady=5)
+
         # Store initial canvas height
         self.canvas_height_inactive = self.screen_height - 200
         
@@ -861,47 +815,6 @@ class AimExercise:
         # Apply sensitivity
         self.apply_custom_sensitivity()
         
-    def select_mode(self, mode):
-        """Select game mode"""
-        self.game_mode = mode
-        
-        # Hide mode selection
-        self.mode_frame.pack_forget()
-        
-        # Update title
-        if mode == 'random':
-            self.title.config(text="Random Targets Mode", font=("Arial", 20, "bold"))
-            self.stats_label.config(text="Press START to begin | M for menu | ESC to exit")
-        elif mode == 'debug':
-            self.title.config(text="Debug Test Mode", font=("Arial", 20, "bold"))
-            self.stats_label.config(text="Single target | Path visualization | SPACE to spawn new target | M for menu")
-        
-        # Show control buttons
-        self.button_frame.pack(pady=10)
-        
-        # Show sensitivity frame (contains both X and Y)
-        self.sens_frame.pack(pady=5)
-        
-        # Show crosshair frame
-        self.crosshair_frame.pack(pady=5)
-        
-        # Show canvas
-        self.canvas.pack(pady=5)
-        
-    def back_to_mode_select(self):
-        """Return to mode selection"""
-        if self.is_active:
-            self.stop_exercise()
-        
-        self.game_mode = None
-        self.button_frame.pack_forget()
-        self.sens_frame.pack_forget()
-        self.crosshair_frame.pack_forget()
-        self.canvas.pack_forget()
-        self.title.config(text="FPS Aim Trainer - Select Your Mode", font=("Arial", 24, "bold"))
-        self.stats_label.config(text="Select a mode to begin")
-        self.mode_frame.pack(pady=20)
-    
     def spawn_random_test_target(self):
         """Spawn a new target in random test mode (called by SPACE key)"""
         if not self.is_active or self.game_mode != 'random':
@@ -1000,7 +913,7 @@ class AimExercise:
         self.last_shot_was_hit = False
         self.last_shot_type = ""
         
-        # Reset debug/analysis markers (used in both debug and random modes)
+        # Reset approach-analysis markers
         self.debug_x_overshoot_pos = None
         self.debug_y_overshoot_pos = None
         self.debug_x_undershoot_points = []
@@ -1020,28 +933,16 @@ class AimExercise:
         self.last_mouse_x = pos[0]
         self.last_mouse_y = pos[1]
         
-        # Spawn initial targets based on mode
-        if self.game_mode == 'random':
-            # Spawn 2 targets
-            self.targets = []
-            self.spawn_target_at_random_position()
-            self.spawn_target_at_random_position()
-            # Initialize path tracking from current position
-            self.path_points = [(self.yaw, self.pitch)]
-            self.has_last_hit = True
-            self.last_hit_yaw = self.yaw
-            self.last_hit_pitch = self.pitch
-        elif self.game_mode == 'debug':
-            # Debug mode: single target, no expiration
-            self.debug_frozen = False  # Whether we're frozen showing results
-            self.debug_freeze_time = 0
-            self.debug_analysis_points = []  # Points in the analysis window
-            self.debug_reversal_points = []  # Where reversals were detected
-            self.debug_pause_points = []  # Where pauses were detected
-            self.spawn_debug_target()
-            # Bind space to spawn new target
-            self.root.bind("<space>", lambda e: self.spawn_debug_target() if (self.is_active and self.game_mode == 'debug') else None)
-        
+        # Spawn 2 initial targets
+        self.targets = []
+        self.spawn_target_at_random_position()
+        self.spawn_target_at_random_position()
+        # Initialize path tracking from current position
+        self.path_points = [(self.yaw, self.pitch)]
+        self.has_last_hit = True
+        self.last_hit_yaw = self.yaw
+        self.last_hit_pitch = self.pitch
+
         self.lock_mouse_loop()
         
     def stop_exercise(self):
@@ -1141,8 +1042,8 @@ class AimExercise:
                 if current_time - self.last_trail_time > 0.01:  # Every 10ms
                     self.last_trail_time = current_time
                     
-                    # Track path for efficiency calculation (random and debug modes)
-                    if (self.game_mode == 'random' or self.game_mode == 'debug') and self.has_last_hit:
+                    # Track path for efficiency calculation
+                    if self.game_mode == 'random' and self.has_last_hit:
                         self.path_points.append((self.yaw, self.pitch))
                 
                 # Recenter mouse to lock position only if window has focus
@@ -1680,42 +1581,6 @@ class AimExercise:
         
         return f'#{r:02x}{g:02x}{b:02x}'
     
-    def spawn_debug_target(self):
-        """Spawn a single target for debug mode - doesn't expire"""
-        if not self.is_active or self.game_mode != 'debug':
-            return
-        
-        self.targets = []
-        
-        # Reset debug visualization
-        self.debug_frozen = False
-        self.debug_analysis_points = []
-        self.debug_reversal_points = []
-        self.debug_pause_points = []
-        self.debug_x_undershoot_points = []
-        self.debug_y_undershoot_points = []
-        self.debug_x_overshoot_pos = None
-        self.debug_y_overshoot_pos = None
-        
-        # Reset path tracking
-        self.path_points = [(self.yaw, self.pitch)]
-        self.has_last_hit = True
-        self.last_hit_yaw = self.yaw
-        self.last_hit_pitch = self.pitch
-        
-        # Calculate world bounds (same as camera clamp)
-        max_pitch = (self.canvas_height / 2) / self.pixels_per_degree * 0.5
-        max_yaw = (self.canvas_width / 2) / self.pixels_per_degree * 0.5
-        
-        # Spawn within bounded world space
-        margin = 0.85
-        target_yaw = random.uniform(-max_yaw * margin, max_yaw * margin)
-        target_pitch = random.uniform(-max_pitch * margin, max_pitch * margin)
-        
-        self.targets.append((target_yaw, target_pitch, time.time()))
-        
-        self.trail_points = []
-        
     def draw_scene(self):
         """Draw the crosshair, trail, and targets based on camera view"""
         self.canvas.delete("all")
@@ -1872,46 +1737,7 @@ class AimExercise:
                 rolling_samples = len(self.recent_x_overshoots)
                 if rolling_samples > 0:
                     rolling_over_under_text = f"[30s]({rolling_samples}): OVER X={rolling_x_over:.0f}% Y={rolling_y_over:.0f}% | UNDER X={rolling_x_under:.0f}% Y={rolling_y_under:.0f}%"
-                
-            elif self.game_mode == 'debug':
-                # Debug mode display
-                stats_text = f"DEBUG MODE | Hits: {self.stats.hits} | Misses: {self.stats.misses} | SPACE = new target"
-                efficiency_text = f"Path points: {len(self.path_points)} | Analysis window: last {int(self.approach_analysis_window * 100)}%"
-                rolling_text = ""
-                rolling_over_under_text = ""  # Not used in debug mode
-                
-                # Detailed approach info - show both over and under
-                approach_text = ""
-                if self.last_shot_analysis:
-                    data = self.last_shot_analysis
-                    approach_text = f"LAST: {self.last_shot_type}"
-                    # Show overshoot distances in degrees
-                    if data['x_max_overshoot'] > 0 or data['y_max_overshoot'] > 0:
-                        approach_text += f" | OVER: X={data['x_max_overshoot']:.2f}° Y={data['y_max_overshoot']:.2f}°"
-                    # Show if undershoot occurred (shot before reaching target edge)
-                    x_under = len(self.debug_x_undershoot_points) > 0
-                    y_under = len(self.debug_y_undershoot_points) > 0
-                    if x_under or y_under:
-                        under_parts = []
-                        if x_under:
-                            under_parts.append("X")
-                        if y_under:
-                            under_parts.append("Y")
-                        approach_text += f" | UNDER: {'+'.join(under_parts)}"
-                
-                # Debug markers info
-                last_shot_text = ""
-                overshoot_count = (1 if self.debug_x_overshoot_pos else 0) + (1 if self.debug_y_overshoot_pos else 0)
-                x_undershoot_count = len(self.debug_x_undershoot_points)
-                y_undershoot_count = len(self.debug_y_undershoot_points)
-                parts = []
-                if overshoot_count > 0:
-                    parts.append(f"{overshoot_count} OVER (X=yellow, Y=orange, XY=red)")
-                if x_undershoot_count > 0 or y_undershoot_count > 0:
-                    parts.append(f"UNDER X={x_undershoot_count} Y={y_undershoot_count} (cyan/magenta)")
-                if parts:
-                    last_shot_text = "Markers: " + " | ".join(parts)
-            
+
             # Show current sensitivity (X and Y) and scoped status
             sens_display = f" | X: {self.current_x_sens:.1f}% Y: {self.current_y_sens:.1f}%"
             if self.scoped_active:
@@ -1933,7 +1759,7 @@ class AimExercise:
             )
             
             # Draw second line (efficiency breakdown) if we have data
-            if (self.game_mode == 'random' or self.game_mode == 'debug') and efficiency_text:
+            if efficiency_text:
                 self.canvas.create_text(
                     center_x,
                     55,
@@ -1943,8 +1769,8 @@ class AimExercise:
                     tags="stats"
                 )
             
-            # Draw third line (rolling 30s metrics) if in random mode
-            if self.game_mode == 'random' and rolling_text:
+            # Draw third line (rolling 30s metrics) if we have data
+            if rolling_text:
                 self.canvas.create_text(
                     center_x,
                     80,
@@ -1955,8 +1781,8 @@ class AimExercise:
                 )
             
             # Draw fourth line (approach analysis) if we have data
-            if (self.game_mode == 'random' or self.game_mode == 'debug') and approach_text:
-                y_pos = 105 if self.game_mode == 'random' else 80
+            if approach_text:
+                y_pos = 105
                 self.canvas.create_text(
                     center_x,
                     y_pos,
@@ -1967,8 +1793,8 @@ class AimExercise:
                 )
             
             # Draw fifth line (last shot details) if we have data
-            if (self.game_mode == 'random' or self.game_mode == 'debug') and last_shot_text:
-                y_pos = 130 if self.game_mode == 'random' else 105
+            if last_shot_text:
+                y_pos = 130
                 self.canvas.create_text(
                     center_x,
                     y_pos,
@@ -1979,7 +1805,7 @@ class AimExercise:
                 )
             
             # Draw sixth line (30-second rolling over/under) if we have data
-            if self.game_mode == 'random' and rolling_over_under_text:
+            if rolling_over_under_text:
                 self.canvas.create_text(
                     center_x,
                     155,
@@ -1998,97 +1824,6 @@ class AimExercise:
                     font=("Arial", 18, "bold"),
                     fill="#ff9900",
                     tags="scoped_indicator"
-                )
-        
-        # Debug mode only: Draw full path visualization
-        if self.game_mode == 'debug' and len(self.path_points) > 1:
-            # Calculate analysis window start index
-            analysis_start = int(len(self.path_points) * (1 - self.approach_analysis_window))
-            
-            # Draw path points
-            for i in range(1, len(self.path_points)):
-                prev_yaw, prev_pitch = self.path_points[i - 1]
-                curr_yaw, curr_pitch = self.path_points[i]
-                
-                # Convert to screen coordinates
-                prev_yaw_diff = prev_yaw - self.yaw
-                while prev_yaw_diff > 180:
-                    prev_yaw_diff -= 360
-                while prev_yaw_diff < -180:
-                    prev_yaw_diff += 360
-                prev_x = center_x + (prev_yaw_diff * self.pixels_per_degree)
-                prev_y = center_y - ((prev_pitch - self.pitch) * self.pixels_per_degree)
-                
-                curr_yaw_diff = curr_yaw - self.yaw
-                while curr_yaw_diff > 180:
-                    curr_yaw_diff -= 360
-                while curr_yaw_diff < -180:
-                    curr_yaw_diff += 360
-                curr_x = center_x + (curr_yaw_diff * self.pixels_per_degree)
-                curr_y = center_y - ((curr_pitch - self.pitch) * self.pixels_per_degree)
-                
-                # Color: gray for early path, green for analysis window
-                if i >= analysis_start:
-                    path_color = "#00ff00"  # Green for analysis window
-                    path_width = 3
-                else:
-                    path_color = "#666666"  # Gray for early path
-                    path_width = 2
-                
-                # Draw path segment
-                if (0 <= prev_x <= self.canvas_width and 0 <= prev_y <= self.canvas_height and
-                    0 <= curr_x <= self.canvas_width and 0 <= curr_y <= self.canvas_height):
-                    self.canvas.create_line(
-                        prev_x, prev_y, curr_x, curr_y,
-                        fill=path_color,
-                        width=path_width,
-                        tags="debug_path"
-                    )
-            
-            # Draw flag icon at path start
-            start_yaw, start_pitch = self.path_points[0]
-            start_yaw_diff = start_yaw - self.yaw
-            while start_yaw_diff > 180:
-                start_yaw_diff -= 360
-            while start_yaw_diff < -180:
-                start_yaw_diff += 360
-            start_x = center_x + (start_yaw_diff * self.pixels_per_degree)
-            start_y = center_y - ((start_pitch - self.pitch) * self.pixels_per_degree)
-            
-            if 0 <= start_x <= self.canvas_width and 0 <= start_y <= self.canvas_height:
-                # Draw flag pole
-                pole_height = 25
-                pole_width = 2
-                self.canvas.create_line(
-                    start_x, start_y,
-                    start_x, start_y - pole_height,
-                    fill="#ffffff",
-                    width=pole_width,
-                    tags="debug_marker"
-                )
-                
-                # Draw flag (triangle pointing right)
-                flag_width = 15
-                flag_height = 10
-                self.canvas.create_polygon(
-                    start_x, start_y - pole_height,  # Top of pole
-                    start_x + flag_width, start_y - pole_height + flag_height // 2,  # Right point
-                    start_x, start_y - pole_height + flag_height,  # Bottom of flag
-                    fill="#00ff00",  # Green flag
-                    outline="#ffffff",
-                    width=1,
-                    tags="debug_marker"
-                )
-                
-                # Draw small base circle
-                base_size = 4
-                self.canvas.create_oval(
-                    start_x - base_size, start_y - base_size,
-                    start_x + base_size, start_y + base_size,
-                    fill="#00ff00",
-                    outline="#ffffff",
-                    width=1,
-                    tags="debug_marker"
                 )
         
         # Draw all targets
@@ -2173,8 +1908,8 @@ class AimExercise:
                 # Reset path for next target
                 self.path_points = [(self.yaw, self.pitch)]
         
-        # Debug and Random mode: Draw OVER/UNDER markers on top of targets (with fade effect)
-        if self.game_mode in ('debug', 'random'):
+        # Draw OVER/UNDER markers on top of targets (with fade effect)
+        if self.game_mode == 'random':
             # Calculate marker opacity based on age
             marker_age = current_time - self.debug_markers_timestamp
             marker_opacity = max(0, 1 - (marker_age / self.debug_markers_fade_duration))
@@ -2445,12 +2180,9 @@ class AimExercise:
         
         # Play fire sound
         self.play_sound('fire')
-        
-        if self.game_mode == 'random':
-            self.handle_random_mode_shot()
-        elif self.game_mode == 'debug':
-            self.handle_debug_mode_shot()
-    
+
+        self.handle_random_mode_shot()
+
     def handle_random_mode_shot(self):
         """Handle shooting in random targets mode - find closest target to crosshair"""
         current_time = time.time()
@@ -2569,61 +2301,7 @@ class AimExercise:
             # Keep path - don't reset until a hit
         
         self.update_stats_display()
-    
-    def handle_debug_mode_shot(self):
-        """Handle shooting in debug test mode"""
-        if not self.targets:
-            return
-        
-        # Get the single target
-        target_yaw, target_pitch, spawn_time = self.targets[0]
-        
-        # Check if we hit (SQUARE hitbox for debug mode)
-        yaw_diff = target_yaw - self.yaw
-        pitch_diff = target_pitch - self.pitch
-        
-        while yaw_diff > 180:
-            yaw_diff -= 360
-        while yaw_diff < -180:
-            yaw_diff += 360
-        
-        target_angular_size = self.target_size / self.pixels_per_degree
-        
-        # Square hitbox: hit if BOTH X and Y are within target bounds
-        hit = (abs(yaw_diff) <= target_angular_size and abs(pitch_diff) <= target_angular_size)
-        
-        # Record stats first
-        if hit:
-            self.stats.record_hit(time.time() - spawn_time)
-            self.play_sound('hit')
-            self.last_shot_type = "HIT"
-        else:
-            self.stats.record_miss()
-            self.last_shot_type = "MISS"
-        
-        self.last_shot_was_hit = hit
-        
-        # Analyze approach with debug capture (may return None if not enough points)
-        approach_data = self.analyze_final_approach(target_yaw, target_pitch, capture_debug=True)
-        
-        if approach_data:
-            self.last_shot_analysis = approach_data
-        else:
-            # Not enough path data - clear previous analysis
-            self.last_shot_analysis = None
-            self.debug_reversal_points = []
-            self.debug_pause_points = []
-            self.debug_x_undershoot_points = []
-            self.debug_y_undershoot_points = []
-            self.debug_x_overshoot_pos = None
-            self.debug_y_overshoot_pos = None
-        
-        # Check for undershoots (shot position vs target edge)
-        x_under, y_under = self.check_undershoot(target_yaw, target_pitch, capture_debug=True)
-        
-        # Don't auto-spawn new target in debug mode - user presses SPACE
-        # Keep the visualization on screen
-    
+
     def on_focus_lost(self, event):
         """Handle window losing focus (tabbing out)"""
         if self.is_active:
