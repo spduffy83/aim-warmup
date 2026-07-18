@@ -73,7 +73,28 @@ class AimExercise:
         self.recent_y_overshoots = deque()  # (timestamp, 0 or 1) tuples
         self.recent_x_undershoots = deque()  # (timestamp, 0 or 1) tuples
         self.recent_y_undershoots = deque()  # (timestamp, 0 or 1) tuples
-        
+
+        # --- Auto-tuner: gradually optimises X/Y sens toward best accuracy ---
+        # Per-shot samples for the tuner: (timestamp, bias, precision, sens_at_shot)
+        #   bias: +1 = overshooting (sens too fast), -1 = undershooting (too slow)
+        #   precision: 0..1 how centred the shot landed on that axis (accuracy signal)
+        self.tune_x = deque(maxlen=80)
+        self.tune_y = deque(maxlen=80)
+        self.tune_window = 60.0       # seconds of shots the forecast considers
+        self.tune_min_shots = 12      # samples before the forecast/drift engage
+        self.tune_interval = 30.0     # min seconds between live 0.1 steps (very gradual)
+        self.tune_deadzone = 0.15     # forecast must lead live by this before stepping
+        self.tune_bias_scale = 1.5    # how far a full bias projects the forecast
+        self.tune_refine_step = 0.2   # accuracy hill-climb nudge near the balance point
+        self.forecast_recalc_dt = 0.25  # seconds between forecast recomputes (4 Hz)
+        self.forecast_ema = 0.15      # smoothing applied to the displayed forecast
+        self.auto_tune_enabled = False
+        self.last_tune_time = 0.0
+        self.last_forecast_time = 0.0
+        # Forecast "perfect settings" (continuous, always displayed)
+        self.forecast_x = self.default_x_sens
+        self.forecast_y = self.default_y_sens
+
         # Session timer (counts up while active and focused)
         self.session_timer = 0.0  # Total elapsed time in seconds
         self.last_timer_update = 0  # Timestamp of last timer update
@@ -355,6 +376,19 @@ class AimExercise:
         )
         self.reset_btn.pack(side=tk.LEFT, padx=10)
 
+        self.auto_tune_btn = tk.Button(
+            self.button_frame,
+            text="AUTO-TUNE: OFF",
+            command=self.toggle_auto_tune,
+            font=("Arial", 12, "bold"),
+            bg="#555555",
+            fg="white",
+            width=15,
+            height=1,
+            relief=tk.FLAT
+        )
+        self.auto_tune_btn.pack(side=tk.LEFT, padx=10)
+
         # Sensitivity controls frame (contains both X and Y)
         self.sens_frame = tk.Frame(self.root, bg="#1a1a1a")
         
@@ -567,7 +601,7 @@ class AimExercise:
         # Stats display
         self.stats_label = tk.Label(
             self.root,
-            text="Press START to begin | ESC to exit",
+            text="Press START to begin | T = toggle auto-tune | ESC to exit",
             font=("Arial", 14),
             bg="#1a1a1a",
             fg="#00ff00"
@@ -591,6 +625,10 @@ class AimExercise:
         # Bind focus events to handle tabbing out
         self.root.bind("<FocusOut>", self.on_focus_lost)
         self.root.bind("<FocusIn>", self.on_focus_gained)
+
+        # Bind T to toggle auto-tuning
+        self.root.bind("<t>", lambda e: self.toggle_auto_tune())
+        self.root.bind("<T>", lambda e: self.toggle_auto_tune())
 
         # Show the control widgets directly (only one mode exists, so there is
         # no mode-select screen to gate them behind)
@@ -842,7 +880,8 @@ class AimExercise:
         self.recent_y_overshoots.clear()
         self.recent_x_undershoots.clear()
         self.recent_y_undershoots.clear()
-        
+        self.reset_tune_state()
+
         # Reset approach analysis tracking
         self.x_overshoots = []
         self.y_overshoots = []
@@ -933,6 +972,7 @@ class AimExercise:
         self.recent_y_overshoots.clear()
         self.recent_x_undershoots.clear()
         self.recent_y_undershoots.clear()
+        self.reset_tune_state()
         self.update_stats_display()
         
     def lock_mouse_loop(self):
@@ -991,9 +1031,12 @@ class AimExercise:
                     self.last_mouse_x = self.center_x
                     self.last_mouse_y = self.center_y
             
+            # Refresh the forecast and (if enabled) gently drift live sens
+            self.update_auto_tune(time.time())
+
             # Always redraw the scene (even when unlocked)
             self.draw_scene()
-            
+
             # Schedule next check
             self.root.after(1, self.lock_mouse_loop)
     
@@ -1383,7 +1426,134 @@ class AimExercise:
             self.recent_x_undershoots.popleft()
         while self.recent_y_undershoots and self.recent_y_undershoots[0][0] < cutoff:
             self.recent_y_undershoots.popleft()
-    
+
+    # ---------------------------------------------------------------------
+    #  Auto-tuner: forecast the accuracy-optimal X/Y and drift toward it
+    # ---------------------------------------------------------------------
+    def _prune_tune(self, samples, current_time):
+        """Drop tuner samples older than the tune window."""
+        cutoff = current_time - self.tune_window
+        while samples and samples[0][0] < cutoff:
+            samples.popleft()
+
+    def _axis_forecast(self, samples, live_sens, current_time):
+        """Estimate the accuracy-optimal sens for one axis from recent shots.
+
+        Returns (target_sens, mean_bias, n). target_sens is where the
+        systematic over/under bias would be nulled (the max-accuracy point),
+        with a small precision hill-climb refinement once bias is balanced.
+        """
+        self._prune_tune(samples, current_time)
+        n = len(samples)
+        if n < self.tune_min_shots:
+            return live_sens, 0.0, n
+
+        mean_bias = sum(b for (_, b, _, _) in samples) / n
+
+        # Primary estimate: shift opposite the bias toward the zero-bias
+        # (systematic-error-free) point, where per-axis accuracy peaks.
+        target = live_sens - mean_bias * self.tune_bias_scale
+
+        # Near balance, hill-climb on measured accuracy: compare precision
+        # posted at the higher vs lower sens levels recently visited.
+        if abs(mean_bias) < 0.15:
+            sens_vals = sorted(s for (_, _, _, s) in samples)
+            median = sens_vals[len(sens_vals) // 2]
+            low = [p for (_, _, p, s) in samples if s <= median]
+            high = [p for (_, _, p, s) in samples if s > median]
+            if len(low) >= 4 and len(high) >= 4:
+                low_acc = sum(low) / len(low)
+                high_acc = sum(high) / len(high)
+                if high_acc > low_acc + 0.03:
+                    target += self.tune_refine_step
+                elif low_acc > high_acc + 0.03:
+                    target -= self.tune_refine_step
+
+        target = max(1.0, min(20.0, target))
+        return target, mean_bias, n
+
+    def update_forecast(self, current_time):
+        """Recompute the always-on 'forecasted perfect settings' (throttled)."""
+        if current_time - self.last_forecast_time < self.forecast_recalc_dt:
+            return
+        self.last_forecast_time = current_time
+
+        tx, _, _ = self._axis_forecast(self.tune_x, self.current_x_sens, current_time)
+        ty, _, _ = self._axis_forecast(self.tune_y, self.current_y_sens, current_time)
+
+        # Smooth the displayed forecast so it glides rather than jumps.
+        a = self.forecast_ema
+        self.forecast_x = (1 - a) * self.forecast_x + a * tx
+        self.forecast_y = (1 - a) * self.forecast_y + a * ty
+
+    def tune_ready(self, current_time):
+        """True when enough recent samples exist for the forecast/drift."""
+        self._prune_tune(self.tune_x, current_time)
+        self._prune_tune(self.tune_y, current_time)
+        return (len(self.tune_x) >= self.tune_min_shots and
+                len(self.tune_y) >= self.tune_min_shots)
+
+    def update_auto_tune(self, current_time):
+        """Always refresh the forecast; when enabled, gently drift live X/Y."""
+        self.update_forecast(current_time)
+
+        if not (self.auto_tune_enabled and self.is_active and self.mouse_locked):
+            return
+        # Only while the window actually has focus (genuine aiming input)
+        if self.root.focus_displayof() is None:
+            return
+        if not self.tune_ready(current_time):
+            return
+        if current_time - self.last_tune_time < self.tune_interval:
+            return
+
+        moved = False
+        dx = self.forecast_x - self.current_x_sens
+        if dx > self.tune_deadzone:
+            self._step_live_sens('x', 0.1); moved = True
+        elif dx < -self.tune_deadzone:
+            self._step_live_sens('x', -0.1); moved = True
+
+        dy = self.forecast_y - self.current_y_sens
+        if dy > self.tune_deadzone:
+            self._step_live_sens('y', 0.1); moved = True
+        elif dy < -self.tune_deadzone:
+            self._step_live_sens('y', -0.1); moved = True
+
+        if moved:
+            self.last_tune_time = current_time
+
+    def _step_live_sens(self, axis, delta):
+        """Apply one gradual 0.1 step to the live sens of one axis."""
+        var = self.x_sens_var if axis == 'x' else self.y_sens_var
+        try:
+            val = float(var.get())
+        except ValueError:
+            val = self.default_x_sens if axis == 'x' else self.default_y_sens
+        val = max(1.0, min(20.0, round(val + delta, 1)))
+        var.set(f"{val:.1f}")
+        self.apply_custom_sensitivity()
+
+    def reset_tune_state(self):
+        """Clear tuner samples and re-seed the forecast at the current sens."""
+        self.tune_x.clear()
+        self.tune_y.clear()
+        self.forecast_x = self.current_x_sens
+        self.forecast_y = self.current_y_sens
+        self.last_tune_time = time.time()
+        self.last_forecast_time = 0.0
+
+    def toggle_auto_tune(self):
+        """Enable/disable automatic drift (the forecast keeps updating either way)."""
+        self.auto_tune_enabled = not self.auto_tune_enabled
+        # Don't fire a step the instant it's switched on.
+        self.last_tune_time = time.time()
+        if getattr(self, 'auto_tune_btn', None) is not None:
+            if self.auto_tune_enabled:
+                self.auto_tune_btn.config(text="AUTO-TUNE: ON", bg="#00aa00")
+            else:
+                self.auto_tune_btn.config(text="AUTO-TUNE: OFF", bg="#555555")
+
     def get_rolling_accuracy(self, current_time):
         """Get accuracy for the last rolling_window seconds"""
         self.prune_rolling_metrics(current_time)
@@ -1754,6 +1924,34 @@ class AimExercise:
                     tags="stats"
                 )
             
+            # Auto-tune / forecasted-perfect-settings line (always shown)
+            n_tune = min(len(self.tune_x), len(self.tune_y))
+            at_state = "ON" if self.auto_tune_enabled else "OFF"
+            at_color = "#00ff88" if self.auto_tune_enabled else "#888888"
+            if n_tune < self.tune_min_shots:
+                forecast_text = (f"AUTO-TUNE {at_state} [T]   "
+                                 f"Forecast: calibrating {n_tune}/{self.tune_min_shots} shots")
+            else:
+                def _arrow(fore, live):
+                    if fore > live + 0.05:
+                        return "↑"   # driving up
+                    if fore < live - 0.05:
+                        return "↓"   # driving down
+                    return "•"       # at target
+                ax = _arrow(self.forecast_x, self.current_x_sens)
+                ay = _arrow(self.forecast_y, self.current_y_sens)
+                forecast_text = (f"AUTO-TUNE {at_state} [T]   Forecast  "
+                                 f"X {self.forecast_x:.1f}{ax}  Y {self.forecast_y:.1f}{ay}   "
+                                 f"(now X {self.current_x_sens:.1f} / Y {self.current_y_sens:.1f})")
+            self.canvas.create_text(
+                center_x,
+                182,
+                text=forecast_text,
+                font=("Arial", 13, "bold"),
+                fill=at_color,
+                tags="stats"
+            )
+
             # Draw scoped indicator if active
             if self.scoped_active:
                 self.canvas.create_text(
@@ -2189,7 +2387,20 @@ class AimExercise:
             self.y_micro_adjustments.append(y_under_val)
             self.recent_x_undershoots.append((current_time, x_under_val))
             self.recent_y_undershoots.append((current_time, y_under_val))
-            
+
+            # --- Auto-tuner samples: directional bias + per-axis accuracy ---
+            x_over_flag = 1 if (approach_data and approach_data.get('x_max_overshoot', 0) > 0) else 0
+            y_over_flag = 1 if (approach_data and approach_data.get('y_max_overshoot', 0) > 0) else 0
+            x_bias = x_over_flag - x_under_val   # +1 = too fast (overshoot), -1 = too slow
+            y_bias = y_over_flag - y_under_val
+            if target_angular_size > 0:
+                x_prec = max(0.0, 1.0 - abs(yaw_diff) / target_angular_size)
+                y_prec = max(0.0, 1.0 - abs(pitch_diff) / target_angular_size)
+            else:
+                x_prec = y_prec = 0.0
+            self.tune_x.append((current_time, x_bias, x_prec, self.current_x_sens))
+            self.tune_y.append((current_time, y_bias, y_prec, self.current_y_sens))
+
             self.last_shot_was_hit = hit
             self.last_shot_type = "HIT" if hit else "MISS"
         
