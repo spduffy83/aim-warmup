@@ -33,37 +33,17 @@ class AimExercise:
         self.h_dpi = h_dpi
         self.v_dpi = v_dpi
         
-        # Sensitivity presets (cm per 360) with Fortnite sens labels
-        self.sensitivity_presets = {
-            1: {'cm360': 31.058, 'fn_sens': '5.3%'},
-            2: {'cm360': 29.22, 'fn_sens': '5.6%'},
-            3: {'cm360': 27.73, 'fn_sens': '5.9%'},
-            4: {'cm360': 26.39, 'fn_sens': '6.2%'},
-            5: {'cm360': 25.72, 'fn_sens': '6.4%'},
-            6: {'cm360': 24.57, 'fn_sens': '6.7%'}
-        }
-        self.current_preset = 1  # Default to preset 1 (Fortnite 5.3%)
-        
-        # Y sensitivity offset options (added to X Fortnite sens %)
-        # Higher Fortnite % = faster (less cm/360)
-        self.y_sens_options = {
-            0: {'label': 'Same', 'offset': None},  # None means match X
-            1: {'label': '+1.0', 'offset': 1.0},
-            2: {'label': '+1.3', 'offset': 1.3},
-            3: {'label': '+1.6', 'offset': 1.6},
-            4: {'label': '+1.9', 'offset': 1.9},
-            5: {'label': '+2.2', 'offset': 2.2},
-            6: {'label': '+2.5', 'offset': 2.5}
-        }
-        self.current_y_option = 6  # Default to "+2.5"
-        
         # Constant for Fortnite sens to cm/360 conversion
         # Fortnite_sens% * cm_per_360 ≈ 164.6
         self.fn_sens_constant = 164.6
-        
+
+        # Default sensitivity values (adjusted via the +/- stepper buttons)
+        self.default_x_sens = 10.0
+        self.default_y_sens = 14.0
+
         # Current sensitivity values (will be set properly after UI creation)
-        self.current_x_sens = 5.4
-        self.current_y_sens = 7.2  # Default Y sensitivity
+        self.current_x_sens = self.default_x_sens
+        self.current_y_sens = self.default_y_sens
         
         # Virtual camera yaw/pitch (in degrees)
         self.yaw = 0.0
@@ -197,7 +177,7 @@ class AimExercise:
             try:
                 x_fn_sens = float(self.x_sens_var.get())
             except (ValueError, AttributeError):
-                x_fn_sens = 5.4  # Default
+                x_fn_sens = self.default_x_sens  # Default
         
         if y_fn_sens is None:
             try:
@@ -236,26 +216,33 @@ class AimExercise:
             x_val = round(x_val, 1)
             self.x_sens_var.set(f"{x_val:.1f}")
         except ValueError:
-            x_val = 5.4
-            self.x_sens_var.set("5.4")
-        
+            x_val = self.default_x_sens
+            self.x_sens_var.set(f"{x_val:.1f}")
+
         try:
             y_val = float(self.y_sens_var.get())
             # Round to 1 decimal place and update display
             y_val = round(y_val, 1)
             self.y_sens_var.set(f"{y_val:.1f}")
         except ValueError:
-            y_val = x_val
+            y_val = self.default_y_sens
             self.y_sens_var.set(f"{y_val:.1f}")
-        
+
         self.apply_sensitivity(x_val, y_val)
-        
-        # Clear preset button highlights since we're using custom values
-        for btn in self.sens_buttons.values():
-            btn.config(bg="#444444")
-        for btn in self.y_sens_buttons.values():
-            btn.config(bg="#444444")
-    
+
+    def adjust_sensitivity(self, axis, delta):
+        """Nudge one axis's sensitivity by delta via the +/- stepper buttons."""
+        var = self.x_sens_var if axis == 'x' else self.y_sens_var
+        default = self.default_x_sens if axis == 'x' else self.default_y_sens
+        try:
+            val = float(var.get())
+        except ValueError:
+            val = default
+        # Clamp to the same 1-20% range apply_sensitivity enforces
+        val = max(1.0, min(20.0, round(val + delta, 1)))
+        var.set(f"{val:.1f}")
+        self.apply_custom_sensitivity()
+
     def apply_scoped_sensitivity(self):
         """Apply scoped sensitivity from the entry field"""
         try:
@@ -385,7 +372,7 @@ class AimExercise:
         self.sens_label.pack(side=tk.LEFT, padx=(0, 10))
         
         # X sensitivity numeric entry
-        self.x_sens_var = tk.StringVar(value="5.4")
+        self.x_sens_var = tk.StringVar(value=f"{self.default_x_sens:.1f}")
         self.x_sens_entry = tk.Entry(
             self.x_sens_row,
             textvariable=self.x_sens_var,
@@ -410,23 +397,21 @@ class AimExercise:
         )
         self.x_sens_percent.pack(side=tk.LEFT, padx=(0, 15))
         
-        # X sensitivity preset buttons
-        self.sens_buttons = {}
-        for preset_num, preset_data in self.sensitivity_presets.items():
+        # X sensitivity stepper buttons (-1, -0.1, +0.1, +1)
+        for label, delta in (("-1", -1.0), ("-0.1", -0.1), ("+0.1", 0.1), ("+1", 1.0)):
             btn = tk.Button(
                 self.x_sens_row,
-                text=f"{preset_data['fn_sens']}",
-                command=lambda p=preset_num: self.set_sensitivity_preset(p),
-                font=("Arial", 10),
+                text=label,
+                command=lambda d=delta: self.adjust_sensitivity('x', d),
+                font=("Arial", 10, "bold"),
                 bg="#444444",
                 fg="white",
-                width=5,
+                width=4,
                 height=1,
                 relief=tk.FLAT
             )
             btn.pack(side=tk.LEFT, padx=2)
-            self.sens_buttons[preset_num] = btn
-        
+
         # Y Sensitivity row
         self.y_sens_row = tk.Frame(self.sens_frame, bg="#1a1a1a")
         self.y_sens_row.pack(pady=3)
@@ -441,7 +426,7 @@ class AimExercise:
         self.y_sens_label.pack(side=tk.LEFT, padx=(0, 10))
         
         # Y sensitivity numeric entry
-        self.y_sens_var = tk.StringVar(value="7.2")
+        self.y_sens_var = tk.StringVar(value=f"{self.default_y_sens:.1f}")
         self.y_sens_entry = tk.Entry(
             self.y_sens_row,
             textvariable=self.y_sens_var,
@@ -466,22 +451,20 @@ class AimExercise:
         )
         self.y_sens_percent.pack(side=tk.LEFT, padx=(0, 15))
         
-        # Y sensitivity quick offset buttons
-        self.y_sens_buttons = {}
-        for option_num, option_data in self.y_sens_options.items():
+        # Y sensitivity stepper buttons (-1, -0.1, +0.1, +1)
+        for label, delta in (("-1", -1.0), ("-0.1", -0.1), ("+0.1", 0.1), ("+1", 1.0)):
             btn = tk.Button(
                 self.y_sens_row,
-                text=option_data['label'],
-                command=lambda o=option_num: self.set_y_sensitivity_offset(o),
-                font=("Arial", 10),
+                text=label,
+                command=lambda d=delta: self.adjust_sensitivity('y', d),
+                font=("Arial", 10, "bold"),
                 bg="#444444",
                 fg="white",
-                width=5,
+                width=4,
                 height=1,
                 relief=tk.FLAT
             )
             btn.pack(side=tk.LEFT, padx=2)
-            self.y_sens_buttons[option_num] = btn
         
         # Scoped Sensitivity row (new)
         self.scoped_sens_row = tk.Frame(self.sens_frame, bg="#1a1a1a")
@@ -771,50 +754,6 @@ class AimExercise:
                 tags="crosshair"
             )
     
-    def set_sensitivity_preset(self, preset_num):
-        """Set the sensitivity to a preset value"""
-        self.current_preset = preset_num
-        fn_sens = float(self.sensitivity_presets[preset_num]['fn_sens'].replace('%', ''))
-        
-        # Update entry field
-        self.x_sens_var.set(f"{fn_sens:.1f}")
-        
-        # Highlight selected preset button
-        for num, btn in self.sens_buttons.items():
-            if num == preset_num:
-                btn.config(bg="#00aa00")
-            else:
-                btn.config(bg="#444444")
-        
-        # Apply sensitivity
-        self.apply_custom_sensitivity()
-    
-    def set_y_sensitivity_offset(self, option_num):
-        """Set the Y sensitivity using offset from current X"""
-        try:
-            x_val = float(self.x_sens_var.get())
-        except ValueError:
-            x_val = 5.4
-        
-        y_option = self.y_sens_options[option_num]
-        if y_option['offset'] is None:
-            y_val = x_val  # Same as X
-        else:
-            y_val = x_val + y_option['offset']
-        
-        # Update Y entry field
-        self.y_sens_var.set(f"{y_val:.1f}")
-        
-        # Highlight selected offset button
-        for num, btn in self.y_sens_buttons.items():
-            if num == option_num:
-                btn.config(bg="#00aa00")
-            else:
-                btn.config(bg="#444444")
-        
-        # Apply sensitivity
-        self.apply_custom_sensitivity()
-        
     def spawn_random_test_target(self):
         """Spawn a new target in random test mode (called by SPACE key)"""
         if not self.is_active or self.game_mode != 'random':
